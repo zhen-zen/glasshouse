@@ -42,6 +42,7 @@ Home, Back, volume, mute and power cannot be changed.
 | **Buttons** | Acts as **OK**, or sends **Play**, **Pause**, **Stop**, **Rewind**, **Fast forward**, **Volume up**, **Volume down** or **Mute**. Volume repeats while held, and works a soundbar on HDMI ARC. |
 | **Home Assistant** | Does nothing on the TV, and leaves the button to your [Home Assistant automations](../HOME-ASSISTANT-REMOTE-BUTTONS.md). |
 | **Input switcher** | Opens LG's quick input picker, where the TV has one (such as a C5 on webOS 11). |
+| **Screenshot** | Saves a picture of the screen, with the parts and size you pick. Offered once screenshots are switched on in [Tools](tools.md#screenshots). Only a press on a remote in the room takes one, and the TV shows a notice each time. Not offered through webOS 11's native key handling. |
 
 Home Assistant hears the streaming buttons, the color keys, the microphone and Google Assistant as [remote button events](../HOME-ASSISTANT-REMOTE-BUTTONS.md) whatever they are set to, while MQTT is on.
 

@@ -2504,6 +2504,29 @@ function handleRequest(req, res) {
 
   if (pathname === '/api/screenshots' || pathname === '/api/screenshots/image') {
     if (!screenshotsModule) return send(res, 503, JSON.stringify({ ok: false, error: 'screenshots module unavailable' }));
+    var shotsOn = screenshotsModule.isEnabled();
+    /*
+     * A screenshot shows what was on the TV, perhaps someone else's: it is seen
+     * on the TV itself, or elsewhere only with the dashboard's token set (the
+     * /api/ gate above has checked it). Never by anyone who can reach the port.
+     */
+    var shotsHere = fromTV(req) || !!config.token;
+    if (pathname === '/api/screenshots' && req.method === 'POST') {
+      return readJsonBody(req, res, function (body) {
+        if (!config.allowControl) return send(res, 403, JSON.stringify({ ok: false, error: msg('srv.controlsOff', 'controls disabled in config') }));
+        function done(r) { send(res, r.ok ? 200 : 400, JSON.stringify(r)); }
+        if (body && body.action === 'enable') return screenshotsModule.setEnabled(body.on === true, done);
+        if (!shotsOn) return done({ ok: false, error: msg('srv.screenshots.off', 'Screenshots are switched off') });
+        if (!shotsHere) return send(res, 403, JSON.stringify({ ok: false, error: msg('srv.screenshots.notHere', 'Screenshots can be seen on the TV itself, or from here once the dashboard has a token') }));
+        if (body && body.action === 'delete') return screenshotsModule.remove(body.id, done);
+        if (body && body.action === 'clear') return screenshotsModule.clear(done);
+        done({ ok: false, error: 'enable, delete or clear expected' });
+      });
+    }
+    if (pathname === '/api/screenshots' && req.method === 'GET' && (!shotsOn || !shotsHere)) {
+      return send(res, 200, JSON.stringify({ ok: true, enabled: shotsOn, here: shotsHere, writable: !!config.allowControl, screenshots: [] }));
+    }
+    if (!shotsOn || !shotsHere) return send(res, shotsOn ? 403 : 404, JSON.stringify({ ok: false, error: shotsOn ? msg('srv.screenshots.notHere', 'Screenshots can be seen on the TV itself, or from here once the dashboard has a token') : msg('srv.screenshots.off', 'Screenshots are switched off') }));
     if (pathname === '/api/screenshots/image' && (req.method === 'GET' || req.method === 'HEAD')) {
       return screenshotsModule.openImage(u.query.id, function (image) {
         if (!image.ok) return send(res, 404, JSON.stringify(image));
@@ -2524,16 +2547,9 @@ function handleRequest(req, res) {
     if (pathname === '/api/screenshots' && req.method === 'GET') {
       return screenshotsModule.list(function (r) {
         r.writable = !!config.allowControl;
+        r.enabled = true;
+        r.here = true;
         send(res, r.ok ? 200 : 500, JSON.stringify(r));
-      });
-    }
-    if (pathname === '/api/screenshots' && req.method === 'POST') {
-      if (!config.allowControl) return send(res, 403, JSON.stringify({ ok: false, error: msg('srv.controlsOff', 'controls disabled in config') }));
-      return readJsonBody(req, res, function (body) {
-        function done(r) { send(res, r.ok ? 200 : 400, JSON.stringify(r)); }
-        if (body.action === 'delete') return screenshotsModule.remove(body.id, done);
-        if (body.action === 'clear') return screenshotsModule.clear(done);
-        done({ ok: false, error: 'delete or clear expected' });
       });
     }
     return send(res, 405, JSON.stringify({ ok: false, error: 'method not allowed' }));

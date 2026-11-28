@@ -4,7 +4,13 @@ The **Tools** tab, `/?tab=tools`, manages screenshots and provides live system l
 
 ## Screenshots
 
-Open **Screenshots** to view captures from an assigned physical remote key, newest first. Choose the capture mode and resolution in [Remote keys](remote.md#remote-keys). Captures show a saved-path or error notice on the TV.
+Screenshots are off until **Take screenshots with a remote key** is switched on here. While it is off, no remote key can be set to take one, Glasshouse's key filter on the TV carries none of their code, and nothing is cleaned up in the background. Switching it off puts any screenshot key back as LG has it and deletes the saved images.
+
+Switched on, a key set to **Screenshot** in [Remote keys](remote.md#remote-keys) saves a picture of the screen, in the capture mode and resolution chosen there. Only a press on a remote in the room takes one: keys sent over the network, from Glasshouse's Remote tab or a phone app, never do. The TV shows a notice each time, saying where the picture can be seen.
+
+A screenshot shows whatever was on the TV, perhaps someone else's viewing, so the images are listed here only on the TV itself, or on a dashboard elsewhere once Glasshouse has a [token](server.md). Without one, other dashboards say where they can be seen instead.
+
+Open **Screenshots** to view the saved captures, newest first.
 
 Each card shows the capture time and resolution; hover over the image for its filename. Select a loaded preview to enlarge it. Close with **×**, outside the image or Escape; keyboard focus returns to the preview. **Download** shows the file size and saves the original PNG and filename.
 

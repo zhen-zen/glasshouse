@@ -63,7 +63,7 @@ var GLASSHOUSE = {
   screenTime: screentime.VALID,
   prometheus: { enabled: isBool },
   update: { check: isBool, askOnTv: isBool },
-  screenshots: { maxMiB: function (v) { return typeof v === 'number' && v > 0 && isFinite(v * 1024 * 1024); } }
+  screenshots: { enabled: isBool, maxMiB: function (v) { return typeof v === 'number' && v > 0 && isFinite(v * 1024 * 1024); } }
 };
 
 /** @type {typeof import('./lgsettings')} */

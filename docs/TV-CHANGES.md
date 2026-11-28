@@ -307,6 +307,10 @@ write permissions. Both dashboards hide the Ambient Light tab when neither
 integration is available; saved links then open Control on the web or Metrics
 in the TV app.
 
+Screenshots are off until switched on on the Tools tab (`screenshots.enabled`); until then the key
+filter carries none of their code and no cleanup runs. Switching them off puts screenshot keys back
+as LG has them and deletes the saved images.
+
 Screenshot assignments write PNGs only under `/tmp/capture_*.png`.
 Captures disappear when the TV restarts.
 

@@ -11,12 +11,41 @@ var WRITE_GRACE_MS = 15000;
 var directory = '/tmp';
 var cleaning = false;
 var nowFn = Date.now;
+/*
+ * Off until switched on on the Tools tab (screenshots.enabled): while off, no
+ * key is offered to take one, the remote-key filter carries none of their
+ * code, and nothing here runs. Switching off deletes the saved images, and
+ * the remote keys put screenshot keys back as LG has them (onChange).
+ */
+var enabled = false;
+var writeSettings = null;
+var onChange = function (on, cb) { cb(); };
 
 function init(opts) {
   var bytes = typeof opts.maxMiB === 'number' ? opts.maxMiB * 1024 * 1024 : 0;
   maxBytes = isFinite(bytes) && bytes > 0 ? bytes : DEFAULT_MAX_BYTES;
   directory = opts.directory || '/tmp';
   nowFn = opts.now || Date.now;
+  enabled = opts.enabled === true;
+  writeSettings = opts.writeSettings || null;
+  if (typeof opts.onChange === 'function') onChange = opts.onChange;
+}
+
+function isEnabled() { return enabled; }
+
+function setEnabled(on, cb) {
+  on = on === true;
+  if (!writeSettings) return cb({ ok: false, error: 'no writeSettings handler configured' });
+  writeSettings({ screenshots: { enabled: on } }, function (err) {
+    if (err) return cb({ ok: false, error: msg('srv.saveSettingFailed', 'could not save the setting: {error}', { error: err.message }) });
+    var was = enabled;
+    enabled = on;
+    if (was !== on) console.log('screenshots: switched ' + (on ? 'on' : 'off'));
+    onChange(on, function () {
+      if (on) return cb({ ok: true, enabled: true });
+      clear(function () { cb({ ok: true, enabled: false }); });
+    });
+  });
 }
 
 function filePath(id) {
@@ -87,7 +116,7 @@ function clear(cb) {
 
 function cleanup(cb) {
   cb = cb || function () {};
-  if (cleaning) return cb({ ok: true });
+  if (cleaning || !enabled) return cb({ ok: true });
   cleaning = true;
   function finish(result) {
     cleaning = false;
@@ -113,4 +142,4 @@ function cleanup(cb) {
   });
 }
 
-module.exports = { init: init, list: list, openImage: openImage, remove: remove, clear: clear, cleanup: cleanup };
+module.exports = { init: init, isEnabled: isEnabled, setEnabled: setEnabled, list: list, openImage: openImage, remove: remove, clear: clear, cleanup: cleanup };

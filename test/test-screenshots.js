@@ -15,7 +15,7 @@ process.on('exit', function () {
   fs.rmdirSync(directory);
 });
 function checkCleanup() {
-  screenshots.init({ directory: directory, now: function () { return 100000; } });
+  screenshots.init({ directory: directory, now: function () { return 100000; }, enabled: true });
   function file(name) { return path.join(directory, name); }
   function make(name, mb, modified) {
     var fd = fs.openSync(file(name), 'w');
@@ -94,7 +94,7 @@ function checkCleanup() {
         var limit = limits.shift();
         reset();
         ['a', 'b', 'c'].forEach(function (id, index) { make('capture_' + id + '.png', 16, index + 1); });
-        screenshots.init({ directory: directory, maxMiB: limit, now: function () { return 100000; } });
+        screenshots.init({ directory: directory, maxMiB: limit, now: function () { return 100000; }, enabled: true });
         screenshots.cleanup(function (r) {
           assert.strictEqual(r.ok, true);
           var kept = ['a', 'b', 'c'].filter(function (id) { return fs.existsSync(file('capture_' + id + '.png')); });
@@ -107,6 +107,20 @@ function checkCleanup() {
       })();
     }
   ];
+  // Switched off, cleanup leaves everything alone: it runs only while on.
+  steps.push(function (next) {
+    make('capture_off_a.png', 40, 1000);
+    make('capture_off_b.png', 1, 2000);
+    screenshots.init({ directory: directory, maxMiB: 32, now: function () { return 100000; } });
+    screenshots.cleanup(function (r) {
+      assert.strictEqual(r.ok, true);
+      assert.ok(fs.existsSync(file('capture_off_a.png')), 'nothing removed while switched off');
+      fs.unlinkSync(file('capture_off_a.png'));
+      fs.unlinkSync(file('capture_off_b.png'));
+      console.log('  \u2713 cleanup runs only while screenshots are switched on');
+      next();
+    });
+  });
   (function next() {
     if (!steps.length) return console.log('test-screenshots.js passed');
     steps.shift()(next);

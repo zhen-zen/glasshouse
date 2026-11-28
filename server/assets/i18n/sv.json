@@ -2890,7 +2890,6 @@
  "srv.remoteKeys.screenOff": {"from": "Screen off", "text": "Skärm av"},
  "srv.remoteKeys.screenshotFailed": {"text": "Det gick inte att ta skärmbilden: {error}", "from": "Screenshot failed: {error}"},
  "srv.remoteKeys.screenshotResolution": {"text": "Skärmbild · {method} · {resolution}", "from": "Screenshot · {method} · {resolution}"},
- "srv.remoteKeys.screenshotSaved": {"text": "Skärmbild sparad: {path}", "from": "Screenshot saved: {path}"},
  "srv.remoteKeys.stop": {"from": "Stop", "text": "Stopp"},
  "srv.remoteKeys.unknownApp": {"from": "That app is not on this TV", "text": "Den appen finns inte på den här TV:n"},
  "srv.remoteKeys.volumeDown": {"from": "Volume down", "text": "Volym ner"},

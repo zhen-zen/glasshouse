@@ -1571,7 +1571,6 @@
  "srv.remoteKeys.saveFailed": {"text": "تعذر حفظ التغيير: {error}", "from": "Could not save the change: {error}"},
  "srv.remoteKeys.screenshotFailed": {"text": "فشل التقاط الشاشة: {error}", "from": "Screenshot failed: {error}"},
  "srv.remoteKeys.screenshotResolution": {"text": "لقطة شاشة · {method} · {resolution}", "from": "Screenshot · {method} · {resolution}"},
- "srv.remoteKeys.screenshotSaved": {"text": "حُفظت لقطة الشاشة: {path}", "from": "Screenshot saved: {path}"},
  "srv.remoteKeys.stop": {"text": "إيقاف", "from": "Stop"},
  "srv.remoteKeys.unknownApp": {"text": "هذا التطبيق غير موجود على هذا التلفاز", "from": "That app is not on this TV"},
  "srv.remoteKeys.volumeDown": {"text": "خفض الصوت", "from": "Volume down"},

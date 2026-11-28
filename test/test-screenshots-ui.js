@@ -91,7 +91,7 @@ function createUI() {
     });
   };
   ui.imageReply = function () { return Promise.resolve(reply(true, png)); };
-  ui.listReply = function () { return Promise.resolve(reply(true, { ok: true, writable: ui.writable, screenshots: ui.listed, maxBytes: ui.maxBytes })); };
+  ui.listReply = function () { return Promise.resolve(reply(true, { ok: true, enabled: ui.enabled !== false, here: ui.here !== false, writable: ui.writable, screenshots: ui.listed, maxBytes: ui.maxBytes })); };
   ui.context = vm.createContext({
     document: document, activeTab: 'tools', q: ui.q, token: '', Date: ClockDate,
     t: function (key, english, vars) { return english.replace(/\{(\w+)\}/g, function (_, name) { return vars[name]; }); },
@@ -225,7 +225,7 @@ function checkViewer() {
     loading = ui.context.loadScreenshots(); renderCount = ui.renders; before = ui.aborted;
     ui.context.openScreenshotViewer(preview);
     assert.strictEqual(ui.aborted, before + 1, 'opening aborts a pending list request');
-    resolveList(reply(true, { ok: true, screenshots: [] }));
+    resolveList(reply(true, { ok: true, enabled: true, here: true, screenshots: [] }));
     return loading.then(flush);
   }).then(function () {
     assert.strictEqual(ui.renders, renderCount, 'a late list reply cannot replace an open image');
@@ -369,6 +369,32 @@ function checkDownloads() {
       }); }, Promise.resolve());
   });
 }
-checkGallery().then(checkViewer).then(checkDeletion).then(checkDownloads).then(function () {
+// Off: no gallery and the switch says Off. On but not viewable from this
+// dashboard: the note shows instead. The switch posts enable.
+function checkSwitch() {
+  var ui = createUI();
+  ui.enabled = false;
+  return load(ui).then(function () {
+    assert.strictEqual(ui.q('screenshots-body').hidden, true);
+    assert.strictEqual(ui.q('screenshots-summary').textContent, 'Off');
+    assert.strictEqual(ui.q('btn_screenshots').textContent, 'Off');
+    assert.strictEqual(ui.images.length, 0);
+    ui.enabled = true; ui.here = false;
+    return load(ui);
+  }).then(function () {
+    assert.strictEqual(ui.q('screenshots-body').hidden, true);
+    assert.strictEqual(ui.q('screenshots-nothere').hidden, false);
+    assert.strictEqual(ui.q('btn_screenshots').textContent, 'On');
+    var done = ui.context.toggleScreenshotsAllowed();
+    assert.deepEqual(ui.writes[ui.writes.length - 1].body, { action: 'enable', on: false });
+    ui.enabled = false;
+    ui.pending.shift().resolve(reply(true, { ok: true, enabled: false }));
+    return done.then(flush);
+  }).then(function () {
+    assert.strictEqual(ui.q('btn_screenshots').textContent, 'Off');
+    console.log('  ✓ the gallery shows only while switched on and viewable here, and the switch posts its change');
+  });
+}
+checkSwitch().then(checkGallery).then(checkViewer).then(checkDeletion).then(checkDownloads).then(function () {
   clearTimeout(guard); console.log('test-screenshots-ui.js passed');
 }).catch(function (error) { console.error(error.stack || error); process.exit(1); });

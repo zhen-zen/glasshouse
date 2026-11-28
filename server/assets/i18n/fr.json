@@ -2391,7 +2391,6 @@
  "srv.remoteKeys.screenOff": {"from": "Screen off", "text": "Écran éteint"},
  "srv.remoteKeys.screenshotFailed": {"from": "Screenshot failed: {error}", "text": "Échec de la capture d'écran : {error}"},
  "srv.remoteKeys.screenshotResolution": {"from": "Screenshot · {method} · {resolution}", "text": "Capture · {method} · {resolution}"},
- "srv.remoteKeys.screenshotSaved": {"from": "Screenshot saved: {path}", "text": "Capture enregistrée : {path}"},
  "srv.remoteKeys.stop": {"from": "Stop", "text": "Arrêt"},
  "srv.remoteKeys.unknownApp": {"from": "That app is not on this TV", "text": "Cette app n'est pas sur cette TV"},
  "srv.remoteKeys.volumeDown": {"from": "Volume down", "text": "Baisser le volume"},

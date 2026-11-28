@@ -66,6 +66,7 @@
     "client": ""
   },
   "screenshots": {
+    "enabled": false,
     "maxMiB": 32
   }
 }

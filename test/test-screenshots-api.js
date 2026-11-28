@@ -27,7 +27,9 @@ process.on('exit', function () {
   });
   fs.rmdirSync(directory);
 });
-screenshots.init({ directory: directory, maxMiB: 64 });
+var savedSettings = [];
+screenshots.init({ directory: directory, maxMiB: 64,
+  writeSettings: function (patch, cb) { savedSettings.push(patch); cb(null); } });
 var config = { allowControl: true, token: 'screenshot-test-token' };
 routes.init({ config: config, screenshots: screenshots });
 var server = http.createServer(function (req, res) {
@@ -52,6 +54,28 @@ function request(method, suffix, body, cb, headers) {
 }
 var steps = [];
 function step(fn) { steps.push(fn); }
+// Off until switched on: nothing is listed, nothing can be read or deleted.
+step(function off(next) {
+  request('GET', '', null, function (res, result) {
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(result.enabled, false);
+    assert.deepEqual(result.screenshots, []);
+    request('GET', '/image?id=' + manualId, null, function (res2) {
+      assert.strictEqual(res2.statusCode, 404, 'no image while switched off');
+      request('POST', '', { action: 'delete', id: manualId }, function (res3, r3) {
+        assert.strictEqual(r3.ok, false);
+        request('POST', '', { action: 'enable', on: true }, function (res4, r4) {
+          assert.strictEqual(r4.ok, true);
+          assert.strictEqual(r4.enabled, true);
+          assert.deepEqual(savedSettings, [{ screenshots: { enabled: true } }]);
+          assert.strictEqual(screenshots.isEnabled(), true);
+          console.log('  ✓ off until switched on, and switched on with the enable action');
+          next();
+        });
+      });
+    });
+  });
+});
 step(function list(next) {
   request('GET', '', null, function (res, result) {
     assert.strictEqual(res.statusCode, 200);
@@ -85,7 +109,7 @@ step(function captureRefused(next) {
   request('POST', '', { action: 'capture' }, function (res, result) {
     assert.strictEqual(res.statusCode, 400);
     assert.strictEqual(result.ok, false);
-    assert.strictEqual(result.error, 'delete or clear expected');
+    assert.strictEqual(result.error, 'enable, delete or clear expected');
     request('POST', '', { action: 'capture', method: 'GRAPHIC', resolution: '960x540' }, function (selected, r) {
       assert.strictEqual(selected.statusCode, 400);
       assert.strictEqual(r.ok, false);
@@ -255,6 +279,24 @@ step(function clearAll(next) {
     });
   });
 });
+// With no dashboard token, screenshots are seen only on the TV itself: from
+// anywhere else nothing is listed or read, though the switch still answers.
+step(function notHere(next) {
+  var token = config.token;
+  config.token = '';
+  request('GET', '', null, function (res, result) {
+    assert.strictEqual(result.enabled, true);
+    assert.strictEqual(result.here, false);
+    assert.deepEqual(result.screenshots, []);
+    request('GET', '/image?id=' + manualId, null, function (res2) {
+      assert.strictEqual(res2.statusCode, 403, 'no image off the TV without a token');
+      config.token = token;
+      console.log('  ✓ without a dashboard token, screenshots are not shown off the TV');
+      next();
+    }, { 'content-type': 'application/json' });
+  }, { 'content-type': 'application/json' });
+});
+
 function run() {
   if (!steps.length) return server.close(function () { console.log('test-screenshots-api.js passed'); });
   steps.shift()(run);

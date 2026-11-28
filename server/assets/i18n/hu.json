@@ -1457,7 +1457,6 @@
  "srv.remoteKeys.saveFailed": {"text": "Nem sikerült menteni a módosítást: {error}", "from": "Could not save the change: {error}"},
  "srv.remoteKeys.screenshotFailed": {"text": "A képernyőkép készítése sikertelen: {error}", "from": "Screenshot failed: {error}"},
  "srv.remoteKeys.screenshotResolution": {"text": "Képernyőkép · {method} · {resolution}", "from": "Screenshot · {method} · {resolution}"},
- "srv.remoteKeys.screenshotSaved": {"text": "Képernyőkép mentve: {path}", "from": "Screenshot saved: {path}"},
  "srv.remoteKeys.stop": {"text": "Leállítás", "from": "Stop"},
  "srv.remoteKeys.unknownApp": {"text": "Ez az alkalmazás nincs ezen a TV-n", "from": "That app is not on this TV"},
  "srv.remoteKeys.volumeDown": {"text": "Hangerő le", "from": "Volume down"},

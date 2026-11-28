@@ -1979,7 +1979,6 @@
  "srv.remoteKeys.screenOff": {"text": "Desligar a tela", "from": "Screen off"},
  "srv.remoteKeys.screenshotFailed": {"text": "Falha na captura de tela: {error}", "from": "Screenshot failed: {error}"},
  "srv.remoteKeys.screenshotResolution": {"text": "Captura · {method} · {resolution}", "from": "Screenshot · {method} · {resolution}"},
- "srv.remoteKeys.screenshotSaved": {"text": "Captura salva: {path}", "from": "Screenshot saved: {path}"},
  "srv.remoteKeys.stop": {"text": "Parar", "from": "Stop"},
  "srv.remoteKeys.unknownApp": {"text": "Esse app não está nesta TV", "from": "That app is not on this TV"},
  "srv.remoteKeys.volumeDown": {"text": "Diminuir volume", "from": "Volume down"},

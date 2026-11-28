@@ -534,7 +534,6 @@
  "srv.remoteKeys.noCaptureResult": {"text": "Kein Aufnahmeergebnis", "from": "No capture result"},
  "srv.remoteKeys.screenshotFailed": {"text": "Screenshot fehlgeschlagen: {error}", "from": "Screenshot failed: {error}"},
  "srv.remoteKeys.screenshotResolution": {"text": "Screenshot · {method} · {resolution}", "from": "Screenshot · {method} · {resolution}"},
- "srv.remoteKeys.screenshotSaved": {"text": "Screenshot gespeichert: {path}", "from": "Screenshot saved: {path}"},
  "srv.remoteKeys.homeBar": {"text": "Glasshouse Bar", "from": "Glasshouse Bar"},
  "srv.remoteKeys.homeBarInstall": {"text": "Glasshouse Bar konnte nicht auf dem Fernseher installiert werden. Versuchen Sie es gleich noch einmal.", "from": "Glasshouse Bar could not be put on the TV. Try again in a moment."},
  "ctl.remoteLink.full": {"text": "Ganzes Dashboard", "from": "Full dashboard"},

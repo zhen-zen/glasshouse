@@ -71,7 +71,10 @@ function luna(uri, params, cb) {
   }
   process.nextTick(function () { cb(r); });
 }
-rk.init({ luna: luna, inputNames: { hdmi1: 'HDMI 1', hdmi2: 'Apple TV' }, stateDir: stateDir, filtersDir: filtersDir });
+// Screenshots, off until switched on (lib/screenshots.js).
+var shotsOn = false;
+rk.init({ luna: luna, inputNames: { hdmi1: 'HDMI 1', hdmi2: 'Apple TV' }, stateDir: stateDir, filtersDir: filtersDir,
+          screenshots: function () { return shotsOn; } });
 
 function exists(p) { try { fs.statSync(p); return true; } catch (e) { return false; } }
 
@@ -180,9 +183,6 @@ step(function (next) {
     assert.deepEqual(r.choices.map(function (c) { return c.id; }),
       ['action:screenOff', 'action:powerOff', 'action:brightnessUp', 'action:brightnessDown', 'media:ok', 'media:play', 'media:pause', 'media:stop', 'media:rewind', 'media:fastForward',
        'media:volumeUp', 'media:volumeDown', 'media:mute',
-       'capture:DISPLAY:1920x1080', 'capture:VIDEO:1920x1080', 'capture:GRAPHIC:1920x1080',
-       'capture:DISPLAY:3840x2160', 'capture:VIDEO:3840x2160', 'capture:GRAPHIC:3840x2160',
-       'capture:DISPLAY:960x540', 'capture:VIDEO:960x540', 'capture:GRAPHIC:960x540',
        'com.webos.app.hdmi1', 'com.webos.app.hdmi2', 'com.webos.app.livetv',
        'com.webos.app.home', 'netflix', 'youtube.leanback.v4']);
     console.log('  ✓ only the keys the TV\'s filters name are offered, each as LG has it, with the media controls, inputs, Home and apps a key can open');
@@ -603,6 +603,10 @@ step(function (next) {
 });
 
 step(function (next) {
+  // Off, as every TV starts: no screenshot key is offered and the filter
+  // carries none of their code.
+  assert.ok(fs.readFileSync(FILTER, 'utf8').indexOf('glasshouseCapture') === -1, 'no capture code while screenshots are off');
+  shotsOn = true;
   var cases = [];
   ['DISPLAY', 'VIDEO', 'GRAPHIC'].forEach(function (method) {
     ['3840x2160', '1920x1080', '960x540'].forEach(function (resolution) { cases.push([method, resolution]); });
@@ -627,7 +631,7 @@ step(function (next) {
       assert.strictEqual(payload.height, +size[1]);
       assert.ok(/^\/tmp\/capture_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.png$/.test(payload.path));
       assert.strictEqual(f.sent[1].payload.sourceId, 'com.webos.surfacemanager');
-      assert.strictEqual(f.sent[1].payload.message, 'Screenshot saved: ' + payload.path);
+      assert.strictEqual(f.sent[1].payload.message, 'Screenshot saved. It can be seen on the Tools tab of Glasshouse\u2019s dashboard.');
       f.handle(1004, true, false, 2);
       assert.strictEqual(f.sent.length, 4, 'a second press captures again');
       check();
@@ -670,7 +674,7 @@ step(function (next) {
     assert.ok(/Screenshot failed: No capture result/.test(f.sent[3].payload.message));
     tv.captureReply = { returnValue: true };
     f.handle(1004, true, false, 2);
-    assert.ok(/^Screenshot saved:/.test(f.sent[5].payload.message), 'object replies also work');
+    assert.ok(/^Screenshot saved\./.test(f.sent[5].payload.message), 'object replies also work');
     delete tv.captureReply;
     tv.captureMissing = true;
     tv.capturePending = [];
@@ -688,9 +692,18 @@ step(function (next) {
     assert.strictEqual(f.sent.filter(function (call) { return call.uri === 'com.webos.notification/createToast'; }).length, 2);
     rk.setRemoteKey('red', 'open', 'capture:DISPLAY:1280x720', guard(function (invalid) {
       assert.strictEqual(invalid.ok, false);
-      rk.setRemoteKey('red', 'lg', '', guard(function () {
-        console.log('  ✓ screenshot keys persist every method and size, capture once per press, and remember the legacy service');
-        next();
+      console.log('  ✓ screenshot keys persist every method and size, capture once per press, and remember the legacy service');
+      // Switched off: the key goes back as LG has it, and the code leaves the filter.
+      rk.setRemoteKey('red', 'open', 'capture:DISPLAY:1920x1080', guard(function (set) {
+        assert.strictEqual(set.ok, true);
+        shotsOn = false;
+        rk.screenshotsChanged(false, guard(function (off) {
+          assert.strictEqual(off.ok, true);
+          assert.strictEqual(JSON.parse(fs.readFileSync(MAP, 'utf8')).keys.red, undefined, 'the screenshot key is put back as LG has it');
+          assert.ok(fs.readFileSync(FILTER, 'utf8').indexOf('glasshouseCapture') === -1, 'the capture code leaves the filter');
+          console.log('  ✓ off by default, nothing offered and no capture code in the filter; switched off, screenshot keys go back as LG has them');
+          next();
+        }));
       }));
     }));
   }

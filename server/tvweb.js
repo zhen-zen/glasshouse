@@ -415,7 +415,7 @@ var CONFIG = {
   },
 
   // Screenshot retention target in MiB; the newest capture is always kept.
-  screenshots: { maxMiB: 32 }
+  screenshots: { enabled: false, maxMiB: 32 }
 };
 
 /* Scanned before loadConfig so --config can point at an alternative file:
@@ -720,7 +720,15 @@ function detectRemotes(cb) {
     cb({ auto: remoteDetect.autoSelected(found, Date.now()), detected: found.remotes });
   });
 }
-remoteKeys.init({ detectRemotes: detectRemotes, luna: luna, subscription: lunaTransport.Subscription, services: servicesModule, inputNames: telemetry.inputNameMap, stateDir: __dirname,
+// Screenshots are off until switched on on the Tools tab; set up before the
+// remote keys, whose filter carries their code only while they are on.
+screenshots.init({
+  maxMiB: CONFIG.screenshots && CONFIG.screenshots.maxMiB,
+  enabled: !!(CONFIG.screenshots && CONFIG.screenshots.enabled === true),
+  writeSettings: routes.writeSettings,
+  onChange: function (on, cb) { remoteKeys.screenshotsChanged(on, function () { cb(); }); }
+});
+remoteKeys.init({ screenshots: function () { return screenshots.isEnabled(); }, detectRemotes: detectRemotes, luna: luna, subscription: lunaTransport.Subscription, services: servicesModule, inputNames: telemetry.inputNameMap, stateDir: __dirname,
   port: CONFIG.port,
   lunaUrgent: lunaTransport.callUrgent,
   colorButtonsSupported: function () { return remotebuttons.findRcuDevices().length > 0; },
@@ -1293,7 +1301,6 @@ barPress.init({
   luna: luna,
   foreground: function () { return (liveState.state.snapshot().application || {}).app || ''; }
 });
-screenshots.init({ maxMiB: CONFIG.screenshots && CONFIG.screenshots.maxMiB });
 routes.init({
   // Where the gzipped dashboard page is kept between starts.
   stateDir: __dirname,

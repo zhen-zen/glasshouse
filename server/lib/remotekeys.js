@@ -417,6 +417,7 @@ var homeIsGlasshouseFn = function () { return false; };
 // PicCap installed on webOS 3+: Ambient light toggle is a key's choice.
 /** @type {function(): boolean} */
 var piccapOn = function () { return false; };
+var screenshotsOn = function () { return false; };
 var piccapToggleFn = null;
 // The server's port, for the filter to ask it to toggle PicCap.
 var serverPort = 8080;
@@ -478,6 +479,8 @@ function init(opts) {
   homeGuideOn = opts.homeGuide || function () { return false; };
   homeIsGlasshouseFn = opts.homeIsGlasshouse || function () { return false; };
   piccapOn = typeof opts.piccap === 'function' ? opts.piccap : function () { return false; };
+  // Screenshots are off until switched on on the Tools tab (lib/screenshots.js).
+  screenshotsOn = typeof opts.screenshots === 'function' ? opts.screenshots : function () { return false; };
   piccapToggleFn = typeof opts.togglePiccap === 'function' ? opts.togglePiccap : null;
   serverPort = parseInt(opts.port, 10) || 8080;
   piccapToggleBusy = false;
@@ -717,7 +720,9 @@ function filterSource() {
     'var glasshousePowerOffArmed = {};',
     'var glasshouseBarPress = 0;',
     'var glasshouseBrightnessStep = ' + BRIGHTNESS_DEFAULT_STEP + ';',
+    '// glasshouse:capture {',
     'var glasshouseCaptureService = "com.webos.service.capture";',
+    '// glasshouse:capture }',
     'var glasshousePiccapBusy = false;',
     // Glasshouse Home has a Home Assistant tile in focus that steps: Channel
     // up and down set to Brightness go to Home instead, while it is in front.
@@ -975,6 +980,7 @@ function filterSource() {
     '    if (glasshouseMediaCodes.hasOwnProperty(name)) glasshouseSendKey(glasshouseMediaCodes[name]);',
     '}',
     '',
+    '// glasshouse:capture {',
     'function glasshouseCapture(id) {',
     '    var match = /^capture:(DISPLAY|VIDEO|GRAPHIC):(3840x2160|1920x1080|960x540)$/.exec(id);',
     '    if (!match) return;',
@@ -992,7 +998,7 @@ function filterSource() {
     '                return take();',
     '            }',
     '            var message = r && r.returnValue === true',
-    '                ? ' + JSON.stringify(msg('srv.remoteKeys.screenshotSaved', 'Screenshot saved: {path}')) + '.replace("{path}", file)',
+    '                ? ' + JSON.stringify(msg('srv.remoteKeys.screenshotSavedTools', 'Screenshot saved. It can be seen on the Tools tab of Glasshouse\u2019s dashboard.')) + '',
     '                : ' + JSON.stringify(msg('srv.remoteKeys.screenshotFailed', 'Screenshot failed: {error}')) + '.replace("{error}", (r && r.errorText) || ' + JSON.stringify(msg('srv.remoteKeys.noCaptureResult', 'No capture result')) + ');',
     '            try {',
     '                lunaCall.send("com.webos.notification", "/createToast", JSON.stringify({ sourceId: lunaCall.appId, message: message }), function () {});',
@@ -1002,6 +1008,7 @@ function filterSource() {
     '    take();',
     '}',
     '',
+    '// glasshouse:capture }',
     '// Opens Home once the app manager runs Glasshouse Home under its id, and',
     '// says it is starting until then. The key has been kept from LG\'s filters.',
     'function glasshouseHomePressed() {',
@@ -1065,6 +1072,7 @@ function filterSource() {
     '                if (!autoRepeat) console.info("glasshouse keyfilter: key", key, "sends", id);',
     '                glasshouseMedia(media);',
     '            }',
+    '            // glasshouse:capture {',
     '        } else if (id.indexOf("capture:") === 0) {',
     '            // Paired network controllers can send the same keys as a remote.',
     '            if (pressed && !autoRepeat && typeof deviceId === "number" && deviceId >= 0 &&',
@@ -1072,6 +1080,7 @@ function filterSource() {
     '                var deviceType = global.getDeviceType(deviceId);',
     '                if (deviceType === "RCU" || deviceType === "MRCU") glasshouseCapture(id);',
     '            }',
+    '            // glasshouse:capture }',
     '        } else if (id === ' + JSON.stringify(HOME_ASSISTANT) + ') {',
     '            // Nothing on the TV: Glasshouse reads the press from the remote itself.',
     '        } else if (id === ' + JSON.stringify(HOME_GUIDE) + ') {',
@@ -1126,7 +1135,20 @@ function filterSource() {
     '}',
     ''
   );
+  // Screenshots switched off: the filter carries none of their code.
+  if (!screenshotsOn()) lines = withoutCapture(lines);
   return lines.join('\n');
+}
+
+// The filter's lines without those between the glasshouse:capture markers.
+function withoutCapture(lines) {
+  var out = [], skip = false;
+  for (var i = 0; i < lines.length; i++) {
+    var marker = /\/\/ glasshouse:capture ([{}])$/.exec(lines[i]);
+    if (marker) { skip = marker[1] === '{'; continue; }
+    if (!skip) out.push(lines[i]);
+  }
+  return out;
 }
 
 function readChain(cb) {
@@ -1173,6 +1195,7 @@ function inEffect(map) {
       if (piccap === null) piccap = piccapOn();
       if (!piccap) continue;
     }
+    if (String(map[k]).indexOf('capture:') === 0 && !screenshotsOn()) continue;
     out[k] = map[k];
   }
   return out;
@@ -2362,6 +2385,7 @@ function dropHomeBarIfUnused(hadBar) {
 }
 
 function captureChoices() {
+  if (!screenshotsOn()) return [];
   var titles = {
     DISPLAY: msg('tools.screenshots.display', 'Full screen'),
     VIDEO: msg('tools.screenshots.video', 'Video only'),
@@ -2715,6 +2739,23 @@ function save(map, cb, home, starting) {
 }
 
 // apply() where this TV's filters are JavaScript, applyNative() on webOS 11.
+/*
+ * Screenshots switched on or off (lib/screenshots.js): the filter is written
+ * again with or without their code, and switched off, a key set to take one
+ * is put back as LG has it. cb(result).
+ */
+function screenshotsChanged(on, cb) {
+  cb = cb || function () {};
+  if (on) return applyAny(function (ok) { cb({ ok: ok }); });
+  var map = readMap();
+  var dropped = false;
+  Object.keys(map).forEach(function (k) {
+    if (String(map[k]).indexOf('capture:') === 0) { delete map[k]; dropped = true; }
+  });
+  if (dropped) return save(map, cb);
+  applyAny(function (ok) { cb({ ok: ok }); });
+}
+
 function applyAny(cb) {
   if (keysOnTv()) return apply(cb);
   hasNativeFilters(function (yes) {
@@ -3058,6 +3099,7 @@ function opensHaBar() {
 
 module.exports = {
   init: init,
+  screenshotsChanged: screenshotsChanged,
   opensInputBar: opensInputBar,
   nativeInputBar: function () { return guidePatch.status().supported; },
   // Glasshouse Bar through the Home key of webOS 11, where the library is one lib/guidepatch lists.

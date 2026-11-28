@@ -1602,7 +1602,6 @@
  "srv.remoteKeys.screenOff": {"text": "Wyłącz ekran", "from": "Screen off"},
  "srv.remoteKeys.screenshotFailed": {"text": "Nie udało się zrobić zrzutu ekranu: {error}", "from": "Screenshot failed: {error}"},
  "srv.remoteKeys.screenshotResolution": {"text": "Zrzut ekranu · {method} · {resolution}", "from": "Screenshot · {method} · {resolution}"},
- "srv.remoteKeys.screenshotSaved": {"text": "Zapisano zrzut ekranu: {path}", "from": "Screenshot saved: {path}"},
  "srv.remoteKeys.stop": {"text": "Stop", "from": "Stop"},
  "srv.remoteKeys.unknownApp": {"text": "Tej aplikacji nie ma na tym telewizorze", "from": "That app is not on this TV"},
  "srv.remoteKeys.volumeDown": {"text": "Ciszej", "from": "Volume down"},

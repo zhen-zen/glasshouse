@@ -2894,6 +2894,17 @@
 <section class="panel" id="toolspane" role="tabpanel" hidden>
   <details class="pv-d" id="disc-screenshots">
     <summary><span data-t="tools.screenshots.title">Screenshots</span> <span class="cur" id="screenshots-summary">&mdash;</span></summary>
+    <div class="prot-table">
+      <div class="prot-row">
+        <div class="prot-main">
+          <div class="prot-title" data-t="tools.screenshots.allow">Take screenshots with a remote key</div>
+          <div class="prot-desc" data-t="tools.screenshots.allowDesc">Off by default. Switched on, a key on the Remote tab can be set to save a picture of the screen. Only a press on a remote in the room takes one, and the TV shows a notice each time. The pictures can be seen on the TV itself, or elsewhere once the dashboard has a token. Switching this off deletes them.</div>
+        </div>
+        <div class="prot-status"><button type="button" class="pill idle" id="btn_screenshots" onclick="toggleScreenshotsAllowed()" disabled>&mdash;</button></div>
+      </div>
+    </div>
+    <div class="pv-note" id="screenshots-nothere" hidden data-t="tools.screenshots.notHere">Screenshots can be seen on the TV itself, or from here once the dashboard has a token.</div>
+    <div id="screenshots-body" hidden>
     <div class="pv-sub" data-t="tools.screenshots.desc">Oldest images are removed automatically to free memory. Images also disappear when the TV restarts.</div>
     <div class="tools-toolbar">
       <button type="button" class="pill" id="screenshots-refresh" onclick="loadScreenshots(true)" data-t="tools.screenshots.refresh">Refresh</button>
@@ -2905,6 +2916,7 @@
     <div class="pv-note" id="screenshots-readonly" hidden data-t="tools.screenshots.readonly">Controls must be enabled to delete screenshots.</div>
     <div class="sub" id="screenshots-message" role="status" aria-live="polite"></div>
     <div class="screenshot-gallery" id="screenshots-gallery"></div>
+    </div>
   </details>
 
   <div class="pv-sec adv-sec" data-t="tools.title">System logs</div>

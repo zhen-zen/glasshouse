@@ -1,4 +1,6 @@
 let screenshotWritable = false, screenshotBusy = false;
+// Whether screenshots are switched on, and whether this dashboard may see them.
+let screenshotsOn = false, screenshotsHere = true;
 let screenshotTimer = null, screenshotListController = null, screenshotImageController = null;
 let screenshotVersion = '', screenshotUrls = new Map();
 let screenshotDeleteId = '', screenshotDeleteUntil = 0, screenshotDeleteTimer = null;
@@ -179,6 +181,19 @@ async function loadScreenshots(clearMessage = false) {
     if (screenshotListController !== controller || !screenshotsVisible()) return;
     if (!response.ok || !result.ok) throw new Error(result.error || t('tools.screenshots.loadFailed', 'Could not load screenshots'));
     screenshotWritable = !!result.writable;
+    screenshotsOn = !!result.enabled;
+    screenshotsHere = result.here !== false;
+    renderScreenshotsAllowed();
+    if (!screenshotsOn || !screenshotsHere) {
+      q('screenshots-body').hidden = true;
+      q('screenshots-nothere').hidden = !screenshotsOn || screenshotsHere;
+      q('screenshots-summary').textContent = screenshotsOn ? '' : t('common.off', 'Off');
+      clearScreenshotDelete();
+      clearScreenshotGallery();
+      return;
+    }
+    q('screenshots-body').hidden = false;
+    q('screenshots-nothere').hidden = true;
     const images = result.screenshots || [];
     if (!screenshotWritable || (screenshotDeleteId === '*' ? !images.length : !images.some(image => image.id === screenshotDeleteId))) clearScreenshotDelete();
     screenshotControls();
@@ -193,6 +208,37 @@ async function loadScreenshots(clearMessage = false) {
       screenshotListController = null;
       if (screenshotsVisible() && !screenshotBusy) screenshotTimer = setTimeout(loadScreenshots, 3000);
     }
+  }
+}
+
+// The switch: On or Off, and whether this dashboard may change it.
+function renderScreenshotsAllowed() {
+  const btn = q('btn_screenshots');
+  btn.textContent = screenshotsOn ? t('common.on', 'On') : t('common.off', 'Off');
+  btn.className = 'pill ' + (screenshotsOn ? 'good' : 'idle');
+  btn.disabled = screenshotBusy || !screenshotWritable;
+}
+
+async function toggleScreenshotsAllowed() {
+  if (!screenshotWritable || screenshotBusy) return;
+  const on = !screenshotsOn;
+  screenshotBusy = true;
+  renderScreenshotsAllowed();
+  q('screenshots-message').textContent = '';
+  try {
+    const response = await fetch(api('/api/screenshots'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'enable', on })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || t('tools.screenshots.switchFailed', 'Could not change the setting'));
+    screenshotsOn = !!result.enabled;
+  } catch (error) {
+    q('screenshots-message').textContent = error.message;
+  } finally {
+    screenshotBusy = false;
+    renderScreenshotsAllowed();
+    updateScreenshots();
   }
 }
 

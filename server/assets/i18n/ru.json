@@ -1457,7 +1457,6 @@
  "srv.remoteKeys.saveFailed": {"text": "Не удалось сохранить изменение: {error}", "from": "Could not save the change: {error}"},
  "srv.remoteKeys.screenshotFailed": {"text": "Не удалось сделать снимок экрана: {error}", "from": "Screenshot failed: {error}"},
  "srv.remoteKeys.screenshotResolution": {"text": "Снимок · {method} · {resolution}", "from": "Screenshot · {method} · {resolution}"},
- "srv.remoteKeys.screenshotSaved": {"text": "Снимок сохранён: {path}", "from": "Screenshot saved: {path}"},
  "srv.remoteKeys.stop": {"text": "Стоп", "from": "Stop"},
  "srv.remoteKeys.unknownApp": {"text": "Этого приложения нет на этом телевизоре", "from": "That app is not on this TV"},
  "srv.remoteKeys.volumeDown": {"text": "Тише", "from": "Volume down"},

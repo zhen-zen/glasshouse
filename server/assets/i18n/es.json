@@ -1228,7 +1228,6 @@
  "srv.remoteKeys.saveFailed": {"text": "No se pudo guardar el cambio: {error}", "from": "Could not save the change: {error}"},
  "srv.remoteKeys.screenshotFailed": {"text": "Error al capturar la pantalla: {error}", "from": "Screenshot failed: {error}"},
  "srv.remoteKeys.screenshotResolution": {"text": "Captura · {method} · {resolution}", "from": "Screenshot · {method} · {resolution}"},
- "srv.remoteKeys.screenshotSaved": {"text": "Captura guardada: {path}", "from": "Screenshot saved: {path}"},
  "srv.remoteKeys.stop": {"text": "Detener", "from": "Stop"},
  "srv.remoteKeys.unknownApp": {"text": "Esa app no está en esta TV", "from": "That app is not on this TV"},
  "srv.remoteKeys.volumeDown": {"text": "Bajar volumen", "from": "Volume down"},

@@ -2843,7 +2843,6 @@
  "srv.remoteKeys.screenOff": {"text": "Tắt màn hình", "from": "Screen off"},
  "srv.remoteKeys.screenshotFailed": {"text": "Không thể chụp màn hình: {error}", "from": "Screenshot failed: {error}"},
  "srv.remoteKeys.screenshotResolution": {"text": "Ảnh chụp màn hình · {method} · {resolution}", "from": "Screenshot · {method} · {resolution}"},
- "srv.remoteKeys.screenshotSaved": {"text": "Đã lưu ảnh chụp màn hình: {path}", "from": "Screenshot saved: {path}"},
  "srv.remoteKeys.stop": {"text": "Dừng", "from": "Stop"},
  "srv.remoteKeys.unknownApp": {"text": "Ứng dụng đó không có trên TV này", "from": "That app is not on this TV"},
  "srv.remoteKeys.volumeDown": {"text": "Giảm âm lượng", "from": "Volume down"},
