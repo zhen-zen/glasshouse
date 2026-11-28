@@ -13,6 +13,7 @@
  *
  * When the English changes, "from" no longer matches and the English is shown
  * until the translation is redone, rather than a translation of the old words.
+ * The released package has "h", a hash of it, in its place (madeFrom below).
  * docs/STRINGS.md has the rules; scripts/check-strings.py enforces them.
  *
  * ES5: the dashboard on the TV runs in the TV's own browser, which on webOS 4
@@ -20,10 +21,10 @@
  */
 (function (root) {
   // Languages that have a file in /assets/i18n/. English needs none.
-  var LANGS = ['es', 'de', 'ru', 'hu', 'it', 'ar', 'pt', 'pt-br', 'pl', 'fr', 'sv', 'vi'];
+  var LANGS = ['es', 'de', 'ru', 'hu', 'it', 'ar', 'pt', 'pt-br', 'pl', 'fr', 'sv', 'vi', 'fi'];
   // Each language in its own words, as the language list shows it, so it can
   // be found whatever the page is in.
-  var NAMES = { en: 'English', es: 'Español', de: 'Deutsch', ru: 'Русский', hu: 'Magyar', it: 'Italiano', ar: 'العربية', pt: 'Português', 'pt-br': 'Português (Brasil)', pl: 'Polski', fr: 'Français', sv: 'Svenska', vi: 'Tiếng Việt' };
+  var NAMES = { en: 'English', es: 'Español', de: 'Deutsch', ru: 'Русский', hu: 'Magyar', it: 'Italiano', ar: 'العربية', pt: 'Português', 'pt-br': 'Português (Brasil)', pl: 'Polski', fr: 'Français', sv: 'Svenska', vi: 'Tiếng Việt', fi: 'Suomi' };
   /*
    * Languages translated only in part, with the pages they cover in full:
    * 'web' (the dashboard), 'tv' (the TV app) and 'home' (Glasshouse Home).
@@ -121,11 +122,34 @@
     });
   }
 
+  /*
+   * The released package carries a short hash of the English in place of the
+   * English (scripts/build-ipk.py), which is most of each file: FNV-1a over
+   * the UTF-16 code units, in base 36. The files in the repository, and those
+   * deploy.sh sends, keep "from", which is compared as it is.
+   */
+  var hashes = {};
+  function englishHash(s) {
+    if (Object.prototype.hasOwnProperty.call(hashes, s)) return hashes[s];
+    var h = 0x811c9dc5;
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = (h + (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24)) >>> 0;
+    }
+    return (hashes[s] = h.toString(36));
+  }
+
+  function madeFrom(entry, english) {
+    if (!entry) return false;
+    if (typeof entry.from === 'string') return entry.from === english;
+    return typeof entry.h === 'string' && entry.h === englishHash(String(english));
+  }
+
   // The key is what a translation is looked up by; the English is shown when
   // there is none, or when the one there was made from different words.
   function t(key, english, vars) {
     var entry = Object.prototype.hasOwnProperty.call(dict, key) ? dict[key] : null;
-    return fill(entry && entry.from === english ? entry.text : english, vars);
+    return fill(madeFrom(entry, english) ? entry.text : english, vars);
   }
 
   // Markup text is written across lines like any other; compare it as it reads.

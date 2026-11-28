@@ -15,7 +15,8 @@ console.log('Running test-compat.js ...');
 assert.strictEqual(compat.standing('home', '9.2.2'), 'tried');
 assert.strictEqual(compat.standing('home', '8.3.0'), 'untried');
 assert.strictEqual(compat.standing('home', '12.0.1'), 'untried');
-assert.strictEqual(compat.standing('home', '2.2.3'), 'untried', 'no version is known not to run Glasshouse Home');
+assert.strictEqual(compat.standing('home', '2.2.3'), 'tried');
+assert.strictEqual(compat.standing('home', '1.4.0'), 'untried', 'no version is known not to run Glasshouse Home');
 assert.strictEqual(compat.standing('inputBar', '11.2.0'), 'unsupported');
 assert.strictEqual(compat.standing('inputBar', '3.9.3'), 'unsupported');
 assert.strictEqual(compat.standing('inputBar', null), 'untried', 'a version not read is untried, not refused');
@@ -52,7 +53,7 @@ function covers(cell, v) {
   });
 }
 var docs = fs.readFileSync(path.join(__dirname, '..', 'docs', 'tested-tvs.md'), 'utf8');
-var rows = { home: 'Glasshouse Home, Minimal and custom launchers', inputBar: 'Glasshouse Bar and the input bar' };
+var rows = { home: 'Glasshouse Home, Minimal and custom launchers', inputBar: 'Glasshouse Bar and the input bar', palmbus: 'Faster communication with the TV (palmbus)' };
 var STANDINGS = ['tried', 'untried', 'unsupported'];
 Object.keys(rows).forEach(function (id) {
   var line = docs.split('\n').filter(function (l) { return l.indexOf('| ' + rows[id] + ' |') === 0; })[0];

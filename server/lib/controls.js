@@ -13,6 +13,7 @@ var nosignal = require('./nosignal');
 var clock = require('./clock');
 var names = require('./names');
 var typing = require('./typing');
+var barPress = require('./barpress');
 
 /*
  * Measured on a B8 against the built-in player, watching playStateNow move:
@@ -109,6 +110,10 @@ var appsModule = null;
 var lgSettings = null;
 /** @type {typeof import('./updater')} */
 var updater = null;
+/** @type {typeof import('./updateask')} */
+var updateAsk = null;
+/** @type {typeof import('./inputbanner')} */
+var inputBanner = null;
 /** @type {typeof import('./devtools')} */
 var devtoolsModule = null;
 /** @type {typeof import('./ntp')} */
@@ -611,7 +616,7 @@ function doControl(action, value, cb) {
       if (!pMode) return cb({ ok: false, error: 'missing picture mode' });
       return luna('com.webos.service.settings/getSystemSettings', { category: 'picture', keys: ['pictureMode'] }, function (cur) {
         if (cur && cur.dimension && cur.dimension.input === 'gallery') {
-          return cb({ ok: false, error: 'picture mode is locked while in Gallery' });
+          return cb({ ok: false, error: msg('srv.picture.galleryLocked', 'picture mode is locked while in Gallery') });
         }
         var pPayload = { category: 'picture', settings: { pictureMode: pMode } };
         if (cur && cur.dimension) pPayload.dimension = cur.dimension;
@@ -959,7 +964,7 @@ function doControl(action, value, cb) {
     case 'nightlyRefresh':
       var nrOn = (value === true || value === 'on' || value === 'ON' || value === 'true');
       if (!resettimeModule || !resettimeModule.supported()) {
-        return cb({ ok: false, error: 'nightly refresh reboot is not supported on this TV' });
+        return cb({ ok: false, error: msg('srv.nightlyRefresh.unsupported', 'nightly refresh reboot is not supported on this TV') });
       }
       if (!writeSettingsFn) return cb({ ok: false, error: 'no writeSettings handler configured' });
       return writeSettingsFn({ nightlyRefresh: nrOn }, function (err) {
@@ -984,7 +989,7 @@ function doControl(action, value, cb) {
 
     case 'piccap':
       // PicCap's screen capture, which feeds an ambient light.
-      if (!piccap) return cb({ ok: false, error: 'PicCap is not available' });
+      if (!piccap) return cb({ ok: false, error: msg('srv.piccap.unavailable', 'PicCap is not available') });
       var capOn = (value === true || value === 'on' || value === 'ON' || value === 'true');
       return piccap.setPower(capOn, function (r) {
         cb({ ok: !!(r && r.ok), error: r && !r.ok ? r.error : undefined });
@@ -996,7 +1001,7 @@ function doControl(action, value, cb) {
 
     case 'huesync':
       // Hue Sync's streaming to a Philips Ambience light.
-      if (!huesync) return cb({ ok: false, error: 'Hue Sync is not available' });
+      if (!huesync) return cb({ ok: false, error: msg('srv.huesync.unavailable', 'Hue Sync is not available') });
       var streamOn = (value === true || value === 'on' || value === 'ON' || value === 'true');
       return huesync.setPower(streamOn, function (r) {
         cb({ ok: !!(r && r.ok), error: r && !r.ok ? r.error : undefined });
@@ -1065,9 +1070,12 @@ function doControl(action, value, cb) {
          * filter that gives Home to the Bar (#1537). The press needs an id of
          * its own, as the filter's do, for the Bar to tell it from a repeat.
          */
+        var barPressNo = Date.now();
         return lunaUrgent('com.webos.applicationManager/launch',
-          { id: homeBarModule.APP, params: { glasshouse: 'bar', press: Date.now() } }, function (r, raw, timing) {
+          { id: homeBarModule.APP, params: { glasshouse: 'bar', press: barPressNo } }, function (r, raw, timing) {
             logRcu(rcuName, rcuAt, timing, r && r.returnValue);
+            // Sent again if the Bar's page, loading again after a close, never has it (lib/barpress).
+            if (r && r.returnValue) barPress.pressed(homeBarModule.APP, barPressNo);
             cb({ ok: !!(r && r.returnValue) });
           });
       }
@@ -1332,6 +1340,19 @@ function doControl(action, value, cb) {
         cb(typeof updateSummaryFn === 'function' ? getUpdateSummary() : r);
       });
 
+    case 'updateAskOnTv':
+      if (!updateAsk) return cb({ ok: false, error: 'not available' });
+      return updateAsk.setEnabled(value === true || value === 'on' || value === 'true', function (r) {
+        if (r && !r.ok) return cb(r);
+        cb(typeof updateSummaryFn === 'function' ? getUpdateSummary() : updater.updateSummary());
+      });
+
+    case 'closeInputBanner':
+      if (!inputBanner) return cb({ ok: false, error: 'not available' });
+      return inputBanner.setEnabled(value === true || value === 'on' || value === 'true', function (r) {
+        cb(r && r.ok ? { ok: true, inputBanner: inputBanner.summary() } : r);
+      });
+
     case 'updateRollback':
       return updater.rollbackUpdate(function (r) {
         if (r && r.ok) setTimeout(function () { doRestartSelf(); }, 600);
@@ -1370,6 +1391,17 @@ function doControl(action, value, cb) {
         }
         saverPowerOff.apply();
         cb({ ok: true, minutes: offMin });
+      });
+
+    // Luna calls through palmbus (lib/luna.js): on, off, or 'default' for what the webOS version gets.
+    case 'setLunaViaPalmbus':
+      var pbSetting = value === true || value === 'on' ? true : value === false || value === 'off' ? false : null;
+      if (!writeSettingsFn) return cb({ ok: false, error: 'no writeSettings handler configured' });
+      return writeSettingsFn({ lunaViaPalmbus: pbSetting }, function (err) {
+        if (err) return cb({ ok: false, error: 'could not save setting: ' + err.message });
+        config.lunaViaPalmbus = pbSetting;
+        require('./luna').setPalmbus(pbSetting);
+        cb(getUpdateSummary());
       });
 
     case 'setPointerEnabled':
@@ -1592,6 +1624,8 @@ function init(opts) {
   if (opts.apps) appsModule = opts.apps;
   if (opts.lgSettings) lgSettings = opts.lgSettings;
   if (opts.updater) updater = opts.updater;
+  if (opts.updateAsk) updateAsk = opts.updateAsk;
+  if (opts.inputBanner) inputBanner = opts.inputBanner;
   if (opts.devtools) devtoolsModule = opts.devtools;
   if (opts.ntp) ntpModule = opts.ntp;
   if (opts.history) historyModule = opts.history;

@@ -19,7 +19,7 @@
  * first 4096 bytes of a downloaded tvweb.js for this line (up to 0.82.2), and
  * refuses a release where it is further down (#586).
  */
-var TVWEB_VERSION = '0.159.0';
+var TVWEB_VERSION = '0.162.0';
 
 var http = require('http');
 var fs = require('fs');
@@ -45,6 +45,7 @@ var updater = require('./lib/updater');
 var fetchLib = require('./lib/fetch');
 var children = require('./lib/children');
 var repo = require('./lib/repo');
+var catalogModule = require('./lib/catalog');
 var installer = require('./lib/installer');
 var privacy = require('./lib/privacy');
 var devtools = require('./lib/devtools');
@@ -66,6 +67,8 @@ var quickAccess = require('./lib/quickaccess');
 var remoteKeys = require('./lib/remotekeys');
 var inputBar = require('./lib/inputbar');
 var askQuestion = require('./lib/ask');
+var updateAsk = require('./lib/updateask');
+var inputBanner = require('./lib/inputbanner');
 var compat = require('./lib/compat');
 
 /*
@@ -82,6 +85,8 @@ function compatTv() {
   };
 }
 var homebar = require('./lib/homebar');
+var barPress = require('./lib/barpress');
+var haBar = require('./lib/habar');
 var clockFormat = require('./lib/clock');
 var homeScreen = require('./lib/homescreen');
 /*
@@ -131,6 +136,7 @@ var audioCapabilities = require('./lib/audio');
 var btAudio = require('./lib/btaudio');
 var huesyncTransport = require('./lib/huesync');
 var remotebuttons = require('./lib/remotebuttons');
+var remoteDetect = require('./lib/remotedetect');
 var logsModule = require('./lib/logs');
 var syslogForwarder = require('./lib/syslog');
 var ntpClient = require('./lib/ntp');
@@ -248,6 +254,10 @@ var CONFIG = {
   // untried (#366, #768). Set here or from the Server tab. It was named
   // allowOnWebos10 until 0.105, and migrateConfigFile() renames that.
   allowExperimentalScreensavers: false,
+  // One-shot luna calls through LG's palmbus binding rather than a luna-send
+  // process each (lib/palmbus.js): true or false, or null for the default,
+  // on where lib/compat lists the TV's webOS version as tried.
+  lunaViaPalmbus: null,
   pointer: { enabled: true, transport: 'websocket', updatesPerSecond: 120 },
 
   // Hiding built-in system tiles is experimental: restarting the app manager
@@ -544,6 +554,18 @@ loadConfig();
 // At the debug level each luna call is logged as it starts and ends, flushed
 // to disk, for a TV that restarts itself (#746).
 lunaTransport.setDebug(getActiveLogLevel() === 'debug');
+// What the Server tab shows of it, with the links to report how it went where it is untried.
+function palmbusInfo() {
+  var st = lunaTransport.palmbusStatus();
+  var tv = compatTv();
+  tv.extra = 'Through luna-send instead: ' + (st.lunaSend.length ? st.lunaSend.map(function (e) { return e.method + ' (' + e.why + ')'; }).join('; ') : 'none') +
+             (st.off ? '\nSwitched off: ' + st.off : '');
+  var c = compat.info('palmbus', tv);
+  st.standing = c.standing;
+  st.webos = c.webos;
+  if (c.report) st.report = c.report;
+  return st;
+}
 
 /*
  * One-shot modes, behind `tvwebctl update` and `tvwebctl rollback`. They run
@@ -566,6 +588,27 @@ var CLI_FORCE = false;
 
 updater.init({ config: CONFIG, version: TVWEB_VERSION, displayVersion: TVWEB_DISPLAY_VERSION, installDir: __dirname });
 
+/*
+ * Not for a one-shot run such as --update, which exits 3 when there is nothing
+ * newer and would be taken for a server that stopped without exiting.
+ */
+if (!CLI_MODE) {
+  var palmbusBoot = '';
+  try { palmbusBoot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); } catch (e) {}
+  var palmbusOn = lunaTransport.configurePalmbus({
+    setting: typeof CONFIG.lunaViaPalmbus === 'boolean' ? CONFIG.lunaViaPalmbus : null,
+    tried: compat.standing('palmbus', telemetry.detectWebosVersion()) === 'tried',
+    stateDir: __dirname,
+    version: TVWEB_DISPLAY_VERSION,
+    boot: palmbusBoot
+  });
+  if (palmbusOn) {
+    console.log('luna: one-shot calls through palmbus (' +
+                (typeof CONFIG.lunaViaPalmbus === 'boolean' ? 'switched on' : 'on by default on this webOS version') + ')');
+  }
+}
+
+
 // ---------------------------------------------------------------- helpers
 var TOAST_SOURCE = 'com.webos.app.home';
 var BROWSER_APP = 'com.webos.app.browser';
@@ -577,7 +620,37 @@ var BROWSER_APP = 'com.webos.app.browser';
  */
 var lunaCacheObj = lunaTransport.createCache(luna);
 
-function lunaCached(uri, payload, ttlMs, cb) { lunaCacheObj.get(uri, payload, ttlMs, cb); }
+function lunaCached(uri, payload, ttlMs, cb) { lunaCacheObj.get(uri, payload, liveTtl(uri, payload, ttlMs), cb); }
+
+/*
+ * Reads a live subscription reports in full, by cache key. While each named
+ * subscription is up, a change it reports clears the read (LIVE_STALE), so
+ * the read is kept a minute rather than asked again every few seconds. With
+ * MQTT on, telemetry asked these every 10 s: most of the 80 to 100 luna-send
+ * processes a minute an idle TV started (a B8 and a C2). The minute bounds
+ * what an event the TV never sends costs.
+ */
+var LIVE_KEPT_MS = 60000;
+var LIVE_COVERS = [
+  { key: 'com.webos.service.tvpower/power/getPowerState|{}', groups: ['power'] },
+  { key: 'com.webos.applicationManager/getForegroundAppInfo|{}', groups: ['application'] },
+  { key: 'com.webos.service.settings/getSystemSettings|{"category":"picture","keys":["backlight","pictureMode","energySaving","screenShift","logoLuminanceAdjust"]}', groups: ['picture'] },
+  // The modes on offer follow the source and its dynamic range, which moves
+  // the picture mode the picture subscription reports.
+  { key: 'com.webos.service.settings/getSystemSettingValues|{"category":"picture","key":"pictureMode"}', groups: ['picture', 'application'] },
+  { key: 'com.webos.audio/getSoundOut|{}', groups: ['audio'] },
+  { key: 'com.webos.service.audio/master/getVolume|{}', groups: ['audio'] }
+];
+
+function liveTtl(uri, payload, ttlMs) {
+  if (ttlMs >= LIVE_KEPT_MS || typeof liveState === 'undefined') return ttlMs;
+  var key = uri + '|' + JSON.stringify(payload || {});
+  for (var i = 0; i < LIVE_COVERS.length; i++) {
+    if (LIVE_COVERS[i].key !== key) continue;
+    return LIVE_COVERS[i].groups.every(liveState.isLive) ? LIVE_KEPT_MS : ttlMs;
+  }
+  return ttlMs;
+}
 
 function clearLunaCache(match) { lunaCacheObj.forget(match); }
 
@@ -588,6 +661,7 @@ function clearLunaCache(match) { lunaCacheObj.forget(match); }
  * and the source's frame rate, whose pipeline id can come back the same.
  */
 var LIVE_STALE = {
+  power: ['com.webos.service.tvpower/power/getPowerState'],
   audio: ['com.webos.audio/', 'com.webos.service.audio/', '"category":"sound"'],
   application: ['getForegroundAppInfo', '"category":"picture"', 'getVRRInfo'],
   picture: ['"category":"picture"']
@@ -599,10 +673,8 @@ btAudio.init({ luna: luna, clearLunaCache: clearLunaCache });
 game.init({ lunaCached: lunaCached, inputKey: telemetry.inputKey });
 appHosts.init({});
 privacy.init({ luna: luna, lunaCached: lunaCached, config: CONFIG, lgSettings: lgSettings, services: servicesModule, appHosts: CLI_MODE ? null : appHosts });
-oled.init({ luna: luna, config: CONFIG });
+oled.init({ luna: luna, lunaFirst: lunaTransport.callFirst, config: CONFIG });
 screenColour.init({ luna: luna });
-// Which capture service the TV has, asked once, a little after start-up.
-if (!CLI_MODE) setTimeout(function () { screenColour.probe(); }, 15000);
 samrescan.init({ luna: luna });
 appsModule.init({ luna: luna, config: CONFIG });
 iconServer.init({ config: CONFIG, apps: appsModule, iptv: iptv });
@@ -634,10 +706,33 @@ servicesModule.init({ stateDir: __dirname });
 preload.init({ luna: luna, stateDir: __dirname });
 doh.init({});
 appDns.init({ luna: luna, stateDir: __dirname, doh: doh });
-quickAccess.init({ luna: luna, inputNames: telemetry.inputNameMap });
-remoteKeys.init({ luna: luna, subscription: lunaTransport.Subscription, services: servicesModule, inputNames: telemetry.inputNameMap, stateDir: __dirname,
+quickAccess.init({
+  luna: luna,
+  inputNames: telemetry.inputNameMap,
+  haBarAllowed: function () { return haBar.available(); },
+  haBarApp: function (action, cb) { tvApp(action, cb, 'habar-app'); },
+  onHaBarKey: function () { haBar.keySet(); }
+});
+remoteDetect.init({ pairing: telemetry.remoteInfo, stateDir: __dirname });
+// The remotes in use (paired, or seen lately, as Automatic reads them) and what was found, for the Remote tab.
+function detectRemotes(cb) {
+  remoteDetect.detect(function (found) {
+    cb({ auto: remoteDetect.autoSelected(found, Date.now()), detected: found.remotes });
+  });
+}
+remoteKeys.init({ detectRemotes: detectRemotes, luna: luna, subscription: lunaTransport.Subscription, services: servicesModule, inputNames: telemetry.inputNameMap, stateDir: __dirname,
+  port: CONFIG.port,
+  lunaUrgent: lunaTransport.callUrgent,
+  colorButtonsSupported: function () { return remotebuttons.findRcuDevices().length > 0; },
+  watchColorButtons: function (on) { remotebuttons.want('remoteKeys', on); },
+  channelButtonsSupported: function () { return remotebuttons.findRcuDevices().length > 0; },
+  watchChannelButtons: function (on) { remotebuttons.want('remoteKeysChannel', on); },
   // The Guide key can open Glasshouse Home's Internet TV guide.
   homeGuide: function () { return !!(glasshouseHome && iptv && glasshouseHome.enabled() && iptv.hasPlaylists()); },
+  homeIsGlasshouse: function () { return !!(glasshouseHome && glasshouseHome.enabled() && !glasshouseHome.isStandalone()); },
+  // PicCap capture on or off, offered where PicCap is installed on webOS 3+.
+  piccap: function () { return !!(piccap && piccap.isInstalled()); },
+  togglePiccap: function (cb) { if (piccap) piccap.toggle(cb); },
   // The compositor restarts for a change to LG's key handler: Glasshouse Home's view is opened afresh.
   compositorRestarted: function () { if (glasshouseHome) glasshouseHome.reopenAfterCompositor(); },
   homeAssistant: function () { return !!(CONFIG.mqtt && CONFIG.mqtt.enabled && CONFIG.mqtt.host); },
@@ -651,7 +746,18 @@ remoteKeys.init({ luna: luna, subscription: lunaTransport.Subscription, services
   homeBarAllowed: function () { return inputBar.allowed(); },
   homeBarApp: function (action, cb) { tvApp(action, cb, 'homebar-app'); },
   homeBarLauncher: function () { return homebar.enabled(); },
-  onHomeBarKey: function () { homebar.keySet(); } });
+  onHomeBarKey: function () { homebar.keySet(); },
+  haBarAllowed: function () { return haBar.available(); },
+  haBarApp: function (action, cb) { tvApp(action, cb, 'habar-app'); },
+  haBarKept: function () {
+    return quickAccess.opensHaBar() ||
+      !!(glasshouseHome && glasshouseHome.haBarInHomeBar() && (homebar.enabled() || remoteKeys.opensHomeBar()));
+  },
+  onHaBarKey: function () { haBar.keySet(); },
+  // A channel key set to Brightness, on webOS 11, while Glasshouse Home has a Home Assistant tile that steps in focus.
+  homeAdjustStep: function (id, dir, cb) {
+    haBar.act(id, 'step', dir, function (r) { cb(r && r.ok ? r.tile : null); });
+  } });
 // A question on the screen from Home Assistant; the answer goes back to MQTT
 // once the bridge is up (onAskAnswer is set in setupHomeAssistant).
 var onAskAnswer = null;
@@ -660,6 +766,8 @@ askQuestion.init({
   tvApp: function (action, cb) { tvApp(action, cb, 'ask-app'); },
   publish: function (ev) {
     console.log('ask: ' + ev.id + ' ' + ev.event_type + (ev.choice ? ' ' + ev.choice : ''));
+    // Glasshouse's own question about a release is not Home Assistant's.
+    if (updateAsk.onAskEvent(ev)) return;
     if (onAskAnswer) onAskAnswer(ev);
   }
 });
@@ -686,6 +794,8 @@ homebar.init({
   compat: function () { return compat.info('inputBar', compatTv(), 'Glasshouse Bar'); },
   on: function () { return !liveState || (liveState.state.snapshot().power || {}).systemOn !== false; },
   byKey: remoteKeys.opensHomeBar,
+  homeInFront: function () { return !!(glasshouseHome && glasshouseHome.viewInFront()); },
+  lastCardApp: function () { return glasshouseHome ? glasshouseHome.lastCardApp() : ''; },
   // Glasshouse Home, or a launcher in its place, off first: LG's Home keeps its place.
   homeOff: function (cb) {
     if (!glasshouseHome || !glasshouseHome.enabled()) return cb({ ok: true });
@@ -701,6 +811,18 @@ clockFormat.init({ luna: luna, onChange: function () { screensavers.restageScree
 // The reads a screen saver's own values come from: the token stays here, in
 // config.json, and the saver only ever sees this server's address.
 haEntity.init({ config: CONFIG });
+haBar.init({
+  luna: luna,
+  stateDir: __dirname,
+  haEntity: haEntity,
+  hour12: clockFormat.hour12,
+  app: function (action, cb) { tvApp(action, cb, 'habar-app'); },
+  on: function () { return !liveState || (liveState.state.snapshot().power || {}).systemOn !== false; },
+  byKey: function () {
+    return remoteKeys.opensHaBar() || quickAccess.opensHaBar() ||
+      !!(glasshouseHome && glasshouseHome.haBarInHomeBar() && (homebar.enabled() || remoteKeys.opensHomeBar()));
+  }
+});
 screensavers.init({
   luna: luna,
   hour12: clockFormat.hour12,
@@ -727,10 +849,11 @@ require('./lib/art').init({
   watchKeys: function (on) { if (!on || remotebuttons.isSupported()) remotebuttons.want('art', on); }
 });
 // A mount does not outlive a reboot: the plain No Signal screen is mounted again.
-nosignal.init({ luna: luna, config: CONFIG });
+nosignal.init({ luna: luna, config: CONFIG, inputNames: telemetry.inputNameMap });
 nosignal.apply();
 telemetry.init({
   luna: luna,
+  lunaFirst: lunaTransport.callFirst,
   lunaCached: lunaCached,
   config: CONFIG,
   oled: oled,
@@ -755,8 +878,14 @@ var liveState = stateModule.init({
   },
   onTvChange: function (ev) {
     // Leaving an input drops game.js's bind, without waiting for someone to ask.
-    if (ev.group === 'application' && ev.key === 'app_id') game.appChanged(ev.value);
-    if (ev.group === 'power' && ev.key === 'state') screensavers.onPowerChange(ev.value);
+    if (ev.group === 'application' && ev.key === 'app_id') {
+      game.appChanged(ev.value);
+      inputBanner.onAppChanged(ev.value, ev.snapshot);
+    }
+    if (ev.group === 'power' && ev.key === 'state') {
+      screensavers.onPowerChange(ev.value);
+      pictureOnChanged(ev.value);
+    }
     tvChanged(ev);
   }
 });
@@ -819,6 +948,8 @@ var onRemoteButton = function (button, code) {
 
 remotebuttons.init({
   onButton: function (button, code) {
+    remoteKeys.handleColorButton(button, code);
+    remoteKeys.handleChannelButton(button, code);
     onRemoteButton(button, code);
   },
   onHomeKey: function (down) {
@@ -832,6 +963,9 @@ remotebuttons.init({
     screensavers.pointerUsed();
   }
 });
+
+if (!CLI_MODE) remoteKeys.startColorButtons();
+if (!CLI_MODE) remoteKeys.startChannelButtons();
 
 controls.init({
   luna: luna,
@@ -851,6 +985,8 @@ controls.init({
   apps: appsModule,
   lgSettings: lgSettings,
   updater: updater,
+  updateAsk: updateAsk,
+  inputBanner: inputBanner,
   devtools: devtools,
   ntp: ntpClient,
   history: history,
@@ -1088,9 +1224,44 @@ updater.init({
   afterPackage: function (ver) { hbcTried = ver; runHomebrewChannelInstaller(); }
 });
 
+// Whether the picture is on, not a screen saver, as tvpower last said.
+var pictureOn = false;
+// Off since the picture was last on: a screen saver ending is not a wake.
+var pictureOffSince = true;
+function pictureOnChanged(raw) {
+  var state = (raw && typeof raw === 'object') ? (raw.raw || raw.state || raw) : raw;
+  var mapped = power.mapState(state);
+  var saver = power.isScreenSaver(mapped);
+  var on = !!mapped.screenOn && !saver;
+  if (!mapped.screenOn && !saver) pictureOffSince = true;
+  if (on && !pictureOn && pictureOffSince) {
+    pictureOffSince = false;
+    updateAsk.onWake();
+  }
+  pictureOn = on;
+}
+// A new release asked about on the TV after a wake, where switched on on the Server tab.
+updateAsk.init({
+  config: CONFIG,
+  updater: updater,
+  ask: askQuestion,
+  writeSettings: routes.writeSettings,
+  install: function (cb) { doControl('update', null, cb); },
+  // In the TV's language: a toast has no page to translate it.
+  toast: function (text) {
+    doControl('toast', say.forLocale(text, clockFormat.qtLocale()), function (r) {
+      if (!r || !r.ok) console.error('update: toast failed: ' + ((r && r.error) || 'no answer'));
+    });
+  },
+  screenOn: function () { return pictureOn; }
+});
+// LG's input banner closed for the remote to reach an HDMI device at once (Inputs tab).
+inputBanner.init({ config: CONFIG, luna: luna, writeSettings: routes.writeSettings });
+
 // Bare in the user agent: a catalog has no use for the commit.
 fetchLib.init({ config: CONFIG, version: TVWEB_VERSION });
 repo.init({ config: CONFIG, luna: luna, fetch: fetchLib });
+catalogModule.init({ config: CONFIG, fetch: fetchLib, screensavers: screensavers, homeLauncher: homeLauncher, nosignal: nosignal, stateDir: __dirname });
 installer.init({
   config: CONFIG,
   luna: luna,
@@ -1118,12 +1289,21 @@ function appsChanged() {
 pointer.init({ luna: luna, hasService: lunaTransport.hasService, config: CONFIG,
   onActivity: function () { screensavers.pointerUsed(); },
   authed: function (req) { return routes.authed(url.parse(req.url || '/', true).query, req); } });
+barPress.init({
+  luna: luna,
+  foreground: function () { return (liveState.state.snapshot().application || {}).app || ''; }
+});
 screenshots.init({ maxMiB: CONFIG.screenshots && CONFIG.screenshots.maxMiB });
 routes.init({
+  // Where the gzipped dashboard page is kept between starts.
+  stateDir: __dirname,
+  barPress: barPress,
+  palmbus: palmbusInfo,
   config: CONFIG,
   audioLevels: audioLevels,
   pointer: pointer,
   inputBar: inputBar,
+  inputBanner: inputBanner,
   ask: askQuestion,
   audio: audioCapabilities,
   btAudio: btAudio,
@@ -1137,6 +1317,7 @@ routes.init({
     return kb && typeof kb.keyboard_visible === 'boolean' ? kb.keyboard_visible : null;
   },
   repo: repo,
+  catalog: catalogModule,
   installer: installer,
   prometheus: prometheus,
   syslog: syslogForwarder,
@@ -1163,6 +1344,7 @@ routes.init({
   appDns: appDns,
   quickAccess: quickAccess,
   remoteKeys: remoteKeys,
+  remoteDetect: remoteDetect,
   homeScreen: homeScreen,
   home: glasshouseHome,
   homePicture: homePicture,
@@ -1171,6 +1353,7 @@ routes.init({
   iptv: iptv,
   screensavers: screensavers,
   haEntity: haEntity,
+  haBar: haBar,
   updater: updater,
   tvApp: tvApp,
   restartSelf: restartSelf,
@@ -1206,6 +1389,7 @@ backupParts.init({
   apps: appsModule,
   home: glasshouseHome,
   resettime: resettime,
+  haBar: haBar,
   alwaysOnSupported: telemetry.alwaysOnSupported
 });
 
@@ -1246,6 +1430,12 @@ if (!CLI_MODE && !webEnabled && !mqttEnabled) {
 }
 
 privacy.checkBootAdBlock(CLI_MODE);
+if (!CLI_MODE) {
+  // Put back the table where another tool took it off (#1716), and keep LG's
+  // update check off while TV updates are blocked (#1363).
+  setInterval(function () { privacy.keepTable(); }, 60000);
+  privacy.checkUpdateSetting();
+}
 if (!CLI_MODE) {
   if (CONFIG.allowNetworkDebugger) devtools.leaveOpen();
   else devtools.blockFromNetwork();
@@ -1318,6 +1508,10 @@ if (CLI_MODE) {
         tvApp('refresh', function (r3) {
           if (r3 && r3.refreshed && r3.ok) console.log('ask: app refreshed to current release');
           if (r3 && r3.refreshed) askQuestion.forgetInstalled();
+          tvApp('refresh', function (r4) {
+            if (r4 && r4.refreshed && r4.ok) console.log('habar: app refreshed to current release');
+            haBar.poke();
+          }, 'habar-app');
         }, 'ask-app');
       }, 'homebar-app');
     }, 'inputbar-app');
@@ -1535,9 +1729,10 @@ function setupHomeAssistant() {
     entities = ha.filterWithholds(entities, {
       discPfx: discPfx,
       devId: devId,
-      publishFn: function (topic, payload, retain) {
+      // Withheld entities are cleared only once the TV's capabilities are known.
+      publishFn: capsSettled ? function (topic, payload, retain) {
         mqttClient.publish(topic, payload, retain);
-      },
+      } : null,
       capabilities: telemetry.getCapabilities({
         updateCheck: !!(CONFIG.update && CONFIG.update.check),
         isOled: oled.getIsOled(),
@@ -1549,7 +1744,7 @@ function setupHomeAssistant() {
 
     // Settings unsupported after an upgrade/removal must not leave retained controls.
     ha.HA_ENTITIES.forEach(function (entry) {
-      if (entry.id.indexOf('huesync_') !== 0) return;
+      if (!capsSettled || entry.id.indexOf('huesync_') !== 0) return;
       if (!entities.some(function (entity) { return entity.id === entry.id; })) {
         mqttClient.publish(discPfx + '/' + entry.type + '/' + devId + '/' + entry.id + '/config', '', true);
       }
@@ -1658,6 +1853,14 @@ function setupHomeAssistant() {
   var lastPub = null;
   var lastInputSig = '';
   var lastCapSig = '';
+  /*
+   * Whether a telemetry read has finished since the connection, so that what
+   * the TV can do is known. Until then nothing is cleared from Home Assistant:
+   * its entities from before the restart are retained on the broker, and an
+   * entity withheld only because its capability had not been read yet, such
+   * as Sound Format on a C2 (webOS 9.2), was taken away and put back 2 s later.
+   */
+  var capsSettled = false;
 
   /*
    * Switched off is a state of the TV, not a loss of it. While the TV is off
@@ -1745,6 +1948,8 @@ function setupHomeAssistant() {
      * the on (an OLED48CX8LC, a second of off on waking).
      */
     if (!statusOnReconnect.pending()) mqttClient.publish(mqttTopics.status, statusPayload(), true);
+    // The descriptions for ten minutes: re-read with the values, they were
+    // a fifth of the luna-send processes an idle TV with MQTT started.
     lgSettings.collect(LGS_SECTIONS, function (ls) {
     telemetry.collectStats(function(s) {
       // No collection has finished yet, as when the first after a cold boot
@@ -1885,12 +2090,13 @@ function setupHomeAssistant() {
         requestDiscoveryRepublish('network address');
       }
       var cap = telemetry.getCapabilitySignature();
-      if (cap !== lastCapSig) {
+      if (cap !== lastCapSig || !capsSettled) {
         lastCapSig = cap;
+        capsSettled = true;
         requestDiscoveryRepublish('capabilities');
       }
     });
-    });
+    }, 0, 600000);
   }
 
   mqttClient.on('connect', function() {
@@ -1906,14 +2112,20 @@ function setupHomeAssistant() {
     // first connect it would otherwise still be undetermined.
     // The app select's options come from listApps, which on a first connect
     // has not been scanned yet - without this it publishes the fallback list.
-    oled.detectOled(function () {
-      telemetry.detectLogoLight(function () {
-        telemetry.refreshInstalledApps(function () {
-          // The Input Source select's options are the names the TV gives its
-          // HDMI inputs, so read them before publishing its discovery.
-          telemetry.refreshInputNames(function () { publishDiscovery(); });
-        });
-      });
+    // Each read through the luna queue's first lane: behind the start's other
+    // calls, the first discovery came 6 s after the connection on a B8.
+    oled.detectOled(function (isOled) {
+      var afterOled = function () {
+        telemetry.detectLogoLight(function () {
+          telemetry.refreshInstalledApps(function () {
+            // The Input Source select's options are the names the TV gives its
+            // HDMI inputs, so read them before publishing its discovery.
+            telemetry.refreshInputNames(function () { publishDiscovery(); }, true);
+          }, true);
+        }, true);
+      };
+      if (isOled && oled.hasGsrStressCount() === null) oled.readOledProtections(afterOled, true);
+      else afterOled();
     });
     mqttClient.subscribe(mqttTopics.commands + '#');
     publishTelemetry();
@@ -2307,6 +2519,8 @@ function startGlasshouseHome() {
     weather: weather,
     news: news,
     haEntity: haEntity,
+    haBar: haBar,
+    ensureHaBarApp: function () { tvApp('install', function () {}, 'habar-app'); },
     mqttOn: function () { return !!(CONFIG.mqtt && CONFIG.mqtt.enabled && CONFIG.mqtt.host); },
     // What the dashboard's Remote section shows: the level, the step it stands
     // in for, and whether it can be read at all. null with no remote paired.
@@ -2316,6 +2530,7 @@ function startGlasshouseHome() {
     },
     iptv: iptv,
     luna: luna,
+    lunaStats: lunaTransport.stats,
     Subscription: lunaTransport.Subscription,
     blockedBy: privacy.blockedBy,
     tvInfo: compatTv,
@@ -2328,6 +2543,7 @@ function startGlasshouseHome() {
     injectKey: controls.injectKey,
     // Which ports have something plugged in, where eim does not say (webOS 4).
     hdmiInputs: telemetry.hdmiInputs,
+    hdmiSignal: telemetry.hdmiSignalByInput,
     // The standalone app on webOS 4, and removing the one earlier builds installed elsewhere.
     installApp: function (action, cb) { tvApp(action, cb, 'home-app'); },
     setHomeKey: remoteKeys.setHome,
@@ -2403,7 +2619,7 @@ if (!CLI_MODE) {
     if (ev.group === 'power' && ev.key === 'systemOn' && ev.value === true) setTimeout(refreshHomeTitles, 20000);
     if (homePicture && ev.group === 'power' && ev.key === 'systemOn') homePicture.want('tv', ev.value !== false);
     // LG puts its own streaming buttons back around each change, not always announced.
-    if (ev.group === 'power' && ev.key === 'state') remoteKeys.powerChanged();
+    if (ev.group === 'power' && ev.key === 'state') remoteKeys.powerChanged(ev.value);
     if (ev.group === 'surface' && ev.key === 'control_app_id' && ev.value === 'com.webos.app.home') refreshHomeTitles();
   });
 
@@ -2480,8 +2696,9 @@ if (!CLI_MODE) {
   // The input bar is preloaded while a remote key opens it and the TV is on.
   inputBar.start();
   homebar.start();
+  haBar.start();
   liveState.state.onChange(function (ev) {
-    if (ev.group === 'power' && ev.key === 'systemOn' && ev.value === true) { inputBar.poke(); homebar.poke(); }
+    if (ev.group === 'power' && ev.key === 'systemOn' && ev.value === true) { inputBar.poke(); homebar.poke(); haBar.poke(); }
   });
 
   telemetry.detectDeviceInfo(function() {

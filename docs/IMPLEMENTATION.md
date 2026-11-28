@@ -130,12 +130,42 @@ its own, `lib/iptv-worker.js` with its readers in `lib/iptv-parse.js`:
   a row, about a minute, as a provider's CDN was seen sending nothing for 30
   to 50 s at a time, and has them all back after 30 s of playing. One that
   never played gets two, as a one-stream account can refuse a channel change
-  for a moment, and none for no picture at all. Each reconnect adds
+  for a moment, and none for no picture at all on a first open; no picture
+  after a refused try gets the two as well. Each reconnect adds
   `gh=<time>` to the URL, as a provider's CDN may be holding a copy of the
   playlist the TV cannot read, such as one gzipped for a client with no
   `Accept-Encoding`. Home sends no Referer, as `localhost` gets a 204 from the
   same CDN. The message only mentions a limit on streams for a playlist with an
   account, which `/api/iptv/stream` reports as `account`.
+- **Home's own player for MPEG-TS**: a provider's MPEG-TS channel plays in
+  mpegts.js (`assets/vendor/mpegts.js`, loaded on the first such channel,
+  driven by `assets/home-iptv.js`),
+  which reads it through `/api/iptv/relay` and feeds the TV's decoder through
+  Media Source Extensions. On top of the rules above: under half a second
+  buffered, the picture is paused until 3 s are buffered again, 3 s more each
+  time on the same stream up to 12 s, and reopened if that does not come; a
+  hole ahead is jumped as the picture reaches it; a picture frozen with over a
+  second buffered is stepped on (`currentTime + 0.1`, at most once in 30 s)
+  after 1.5 s and reopened after 4 s. It keeps 12 to 24 s behind the picture:
+  a browser removes video up to the next keyframe after the end it is given.
+  A channel with no H.264 or HEVC video, with MPEG sound (MP2, read as mp3:
+  a G3 on webOS 10.3 showed no picture with it), with two decoding errors
+  in a visit without 30 s of playing between them, or with no picture in
+  12 s on its first open, goes to the TV's player for the rest of the visit.
+  mpegts.js reads the stream on the page rather than in a worker, which held
+  a G3's page about 34 MB lower on a 720p channel. HLS, paused
+  live TV, satellite tuners, and an https link on node before 12 (no usable CA
+  bundle) use the TV's player.
+- **The relay rejoins**: for Home's player, `relayStream` follows up to 4
+  redirects and tries all of a host's IPv4 addresses at once, keeping the
+  first to connect for 10 minutes. A stream that closes, errors, or sends
+  nothing for 15 s while being read is asked for again in the same response
+  (after 0.3, 1, 2, 3, 4, 5 and 5 s; all back after a minute of stream).
+  `lib/iptv-splice` joins the connections: per elementary stream it drops a
+  PES whose timestamp is not after the last one sent, and holds the latest
+  until the next starts, so one cut short comes whole from the next
+  connection. Timestamps more than a minute back mean the channel started
+  again: the response ends and Home reopens it.
 - **Stream events go to the log**: Home posts each start, stall, error,
   skipped hole, reconnect, recovery and give-up to `/api/iptv/event`, which
   writes one `iptv: stream` line each (at most 120 an hour) with the
@@ -995,8 +1025,8 @@ is gone, so there is no JavaScript to put first; the old configd key is still
 there, read by nothing. `remotekeys.js` takes this path where the KeyFilters
 directory names no keys and configd has `keyFiltersCpp`.
 
-LG's launch library reads what a key does from two values at every press, so a
-change applies at once with nothing reloaded:
+LG's launch library reads what a key does from two values, and takes up a
+change to either at once with nothing reloaded:
 
 - **Streaming buttons and Apps**: the settings service's `other.mapping_info`,
   a list of `{ name: { app_id, launch_param, isActive } }` that LG's server
@@ -1026,13 +1056,21 @@ values again a second after any change; more than twelve such writes in a
 minute are left to the next check, so it never takes turns with LG without
 end. Not every write is announced: around one switch off and on LG wrote nine
 times, five of them unannounced, the last a minute after the TV came on. So
-each change of power state is also followed by checks 3 s, 15 s, 1, 3 and 10
-minutes after it, and the server checks at its start and every 30 minutes,
-writing nothing while all is in place. The microcontroller's copy is not changed, so a streaming
+each change of power state is also followed by checks at once and 3 s, 15 s,
+1, 3 and 10 minutes after it, and the server checks at its start and every 30 minutes,
+writing nothing while all is in place. After a wake from standby, though, a
+list that reads as set is not always the one LG's launch library acts on: on a
+C6 (webOS 11, 43.11.77) a Netflix button set to **Nothing** opened Netflix
+after some hours off, with `mapping_info` still saying Nothing, until the
+button was changed and changed back ([#1671](https://github.com/rorygallagher2024/glasshouse/issues/1671)).
+So each check after a wake writes the list twice even where it reads as set:
+the buttons Glasshouse holds with `launch_param` changed, then as they should
+be. Both are changes, which the library takes up, and a button set to
+**Nothing** stays off in both. The microcontroller's copy is not changed, so a streaming
 button pressed to switch the TV on opens LG's app.
 `tvwebctl restore-keys` writes LG's values back and deletes both files. The
-other keys Glasshouse offers elsewhere (Input, the color keys, Search, Info) are
-not offered: their handling on webOS 11 ignores these values, as does that of
+other keys Glasshouse intercepts elsewhere (Input, Search, Info) are
+not offered through these settings: their handling on webOS 11 ignores these values, as does that of
 Home and **123**. Home Hub, the AI button and the ? button are offered only
 there, and left out of the JavaScript filter, whose file is
 unchanged.
@@ -1099,6 +1137,21 @@ and answers a press at once and each repeat logged with a step. `lginput2` also 
 not read. The filter asks for the profile once, as it loads, so a change of the
 keys set restarts the compositor, as the other changes to LG's libraries do.
 
+### webOS 11 remote keys in detail
+
+What the [Remote](dashboard/remote.md#webos-11) page sums up, button by button:
+
+* **Guide:** **Glasshouse Home's guide** is offered on the Guide key alone, on TVs whose key handler Glasshouse knows how to change (an OLED48C31LA on firmware 44.00.92 and an OLED65C35LA on 43.21.71 so far). Setting it changes a few bytes of LG's `libappLaunch.so.1` in a copy mounted over it and restarts the TV's screen once, about 35 s, and again each time the TV starts. Where the TV's build is not known, it is not offered. Without it (or on a build that does not skip the input branch), LG hands the Guide key to the input before Glasshouse's setting is read, so on Live TV and the HDMI inputs it opens the input's own guide whatever the key is set to, while the setting applies on Home and in apps ([#1615](https://github.com/rorygallagher2024/glasshouse/issues/1615)). On the OLED65C35LA with Glasshouse Home's guide set, Guide on an HDMI input opens Glasshouse Home's guide too.
+* **Input:** offered on the same TVs, with the same change to LG's library and the same restart of the screen. It can open an app, an HDMI input, Live TV or the input bar, or stay as LG has it; it cannot do nothing, take a media key or an action, or open an app whose id is longer than 30 characters.
+* **Screen off:** on Netflix, Prime Video and Home Hub. The button shows LG's "This function is not supported" notice, and Glasshouse turns the screen off about 0.5 s after the press. LG restores its streaming button assignments when the screen goes off, and Glasshouse applies them again moments later.
+* **Brightness up and down, Ambient light:** on the same buttons as Screen off, and the patched channel keys, answered from the system log in the same way. A press is one step; holding a streaming button does not repeat, and two presses less than half a second apart count as one.
+* **Channel up and down:** where the key handler can be changed (an OLED48C54LA on firmware 43.21.77 so far), each can do Nothing, Screen off, Brightness up or down, or open an app or an input, and no longer changes the channel anywhere; setting one, or setting it back, restarts the screen once, about 35 s, and the change is made again at each start. A Brightness key then steps while held, about five a second after the first half second. Without a known key handler, on a TV with a readable remote input device, each can only open an app or an input: the press is read from the remote's own input events rather than taken from LG, so Glasshouse must be running, the key may still change the channel too, and nothing on the TV is changed to offer it. On webOS 4 to 10 they were tried on a B8 (webOS 4.4) and an OLED48C56LB (webOS 10.3.0).
+* **Color keys:** where Glasshouse can read the remote's input devices, Red, Green, Yellow and Blue can open an app, an HDMI input, Live TV or the input switcher. They need the Glasshouse server running, without MQTT or Home Assistant, and are kept with the other keys and in settings backups. The key still reaches the app on screen, so its own action may run too, and Nothing is not offered.
+* **AI:** changing it switches off LG's voice assistant entirely (voice search, the AI assistant and the microphone) until it is As LG has it again. Glasshouse opens the chosen target about 1 s after the press.
+* **Alexa:** changing it stops Alexa from opening, and hides every on-screen notice for 4 s to cover Amazon's "Alexa is loading". Some TVs will not let Alexa be stopped (a C3 with webOS 11.2); there, once the TV has refused, the button is no longer offered and stays as LG has it. See [webOS 11: LG's own values](#webos-11-lgs-own-values).
+* **?:** press and hold are set separately, and it cannot be set to Nothing. A streaming button set to Nothing shows LG's "This function is not supported" notice.
+* **Ivi, Okko, Kinopoisk and LG Shop** are offered under Streaming buttons when LG enables their assignments; they can open an app or input, do nothing, or be As LG has it.
+
 ## The input bar
 
 The [input bar](dashboard/inputs.md#glasshouse-input-bar) is a web app of its own,
@@ -1134,6 +1187,16 @@ with a growing wait, five times at most until the server starts again. The
 measurements behind each choice are in
 [TV-RESEARCH.md](development/TV-RESEARCH.md#overlay-web-apps-and-the-input-bar-webos-653-c1).
 
+The Home Assistant bar's app (`assets/habar-app/`) carries no page of its
+own: it loads `assets/habar.html` from the server once, as it starts, and a
+preloaded copy outlives a server restart. So `lib/habar.js` names the page
+it serves by a hash of its text, in `/api/ha/bar/state` and in
+`/api/ha/bar/page`, which the hidden page reads each minute without Home
+Assistant being asked. Where the hash differs from the one the page first
+saw, the page loads itself again as preloaded: at once while hidden, else
+once it closes, so a bar on screen is never taken away. A watchdog restart
+serves the same page, so it reloads nothing.
+
 ## Older hardware capabilities (webOS 3.x and LCD models)
 
 Testing against 2016 hardware (such as 43UH610V-ZB and 55UH6030-UC on webOS 3.4.3) highlights several differences between older LCD platforms and modern OLED sets:
@@ -1159,7 +1222,13 @@ lines over each time it is written, other blockers' sinkholes included: Life's
 Good Without Spying and LG App Update Blocker write nothing else, and the table
 the Homebrew Channel's update block mounts would otherwise switch them off
 (#1370). They sit under a `# Kept from /etc/hosts` header, which tells them
-apart from the table's own sinkholes when it is written again. Switched off,
+apart from the table's own sinkholes when it is written again. Their comment
+lines go with them, in their order, since a tool may read its own: Life's Good
+Without Spying looks for its marker to know its block is up (#1716). A comment
+over lines that are not carried, such as the Homebrew Channel's over its update
+lines, is left out, as are the table's own. A comment another tool appends to
+the table, as LG App Update Blocker's boot hook does, starts that tool's lines.
+Switched off,
 the table comes down, and any of them the file underneath lacks are written
 into it. Where that file cannot be written, as on a C4 on webOS 10.3.1 where it
 is on the read-only squashfs rootfs, the table goes back up blocking nothing,
@@ -1171,9 +1240,12 @@ Spying binds its own file there. A mount on it then reaches its peers, so the
 table also covered `/tmp/hosts` or that tool's file, and the tool, which
 copies `/etc/hosts` into its file, failed
 ([#1571](https://github.com/rorygallagher2024/glasshouse/issues/1571)). So
-before the table is bound, both by the server and by `50-tvweb`, the mount at
-`/etc/hosts` is made a slave (`mount --make-slave`): it still takes what
-reaches it from its peers, and no longer passes the table on. A line is the
+before and after the table is bound (and on server start if an already-mounted
+table is shared), both by the server and by `50-tvweb`, the mount at
+`/etc/hosts` is made a slave (`mount --make-slave`): before binding it stops the
+table from reaching peers underneath, and after binding it stops the new mount
+from inheriting `/var/lib`'s shared group and passing later mounts onto
+`adblock_hosts` ([#1712](https://github.com/rorygallagher2024/glasshouse/issues/1712)). A line is the
 blocker's own if it is a comment, a localhost line, one of its sinkholes above
 that header, or a non-sinkhole line naming a host the table decides on, and
 anyone else's otherwise. The last rule is for the Homebrew Channel's update
@@ -1632,14 +1704,15 @@ saturation and brightness, or the half's average where nothing is vivid. A
 near-black screen has no accent. One capture serves every request within
 1.5 s.
 
-Which service the TV has is asked once, 15 s after start-up, without a
-capture: `executeOneShot` with no path. A service that is there refuses the
-request (`Invalid argument` on a B8, `ERROR_NOT_ENOUGH_MEMORY` on a C2), and
-the bus answers `Service does not exist` for one that is not. With neither,
-the Server tab's summary has `screenGlowSupported: false`, the route answers
-`{ ok: false, unsupported: true }`, and the dashboard hides the glow's
-switches and says why on the Server tab. A capture that finds both missing
-counts the same. A service that does not answer leaves the question open.
+Which service the TV has is learned from the first capture a dashboard asks
+for, never at start-up: even `executeOneShot` with no path makes a C1's
+captureservice (webOS 6) acquire `VT_CAPTURE` from the resource manager, taking
+it from PicCap, which stays stopped until the screen is turned off and on
+(#1754). The bus answers `Service does not exist` for a service that is not
+there. With neither, the Server tab's summary has `screenGlowSupported: false`,
+the route answers `{ ok: false, unsupported: true }`, and the dashboard hides
+the glow's switches and says why on the Server tab. Until then the summary has
+`null` and the switches show.
 
 A capture takes about 0.2 s on a C2 and 0.7 s on a B8, mostly the capture
 hardware: one every 3 s added under 1% to a B8's CPU. With no signal on an
@@ -2090,11 +2163,28 @@ restore-glasshouse-home` over SSH is seen by a running server.
 The apps, inputs, channels and cards the rows are built from are kept as last
 read in `home-lists.json`. Just after the server starts, every luna call waits
 its turn 150 ms apart (`lib/children.js`), and a view opened then waited 7.9 s
-for its first catalogue on a B8 (webOS 4.4.3). Until each list has been read in
-this run, the saved one is answered at once and read again behind it; a list
-that changed bumps `layoutVersion`, so the view reloads on its next heartbeat.
-The catalogue route takes the layout and wallpapers from `viewStatus()`, which
-makes no luna calls. While Glasshouse Home is on, the boot hook starts the
+for its first catalogue on a B8 (webOS 4.4.3). The catalogue and Last watched
+answer from known lists and refresh them after the reply if expired (30 s;
+10 minutes for channels). The channel picker and tile actions wait for an
+expired in-memory list to refresh. One read runs per list, and a failed read
+keeps it. Waiting for those reads made a catalogue take 0.5 s on a G3
+(webOS 9.2.2), ten luna-send children in turn. A changed list bumps
+`layoutVersion`. A catalogue reports the version from before it started, so
+the next heartbeat still picks up any change made during the read. A tile
+that fails to open asks for the catalogue at once, as it may be for an app
+removed while Home was away. The catalogue takes
+the layout and wallpapers from `viewStatus()`, which makes no luna calls, and
+carries `rev`, a hash of everything in it but `layoutVersion`: a view that
+already has that rev applies nothing again. Inputs with no signal are marked
+on copies of the cached list, so the list does not differ from every read.
+The guide on the Channels row is answered from its last read for a minute.
+After that, it is answered from the last read, and read again behind it, only
+while that read has a programme on for every picked channel; otherwise the
+reply waits for a new read, one call per channel in turn. LG can answer with
+no programme for a channel for minutes (BBC One for about ten on a G3, webOS
+9.2.2), and an answer from memory would leave it blank a minute after LG has
+one. The storage manager's media servers are kept sorted, since it lists
+them in a new order at each read and a reordered list would reload the view. While Glasshouse Home is on, the boot hook starts the
 server without its 5 s wait: on webOS 4 the Home key opens the view (25 s into
 a B8's boot) before webosbrew runs the hook (41 s).
 
@@ -2106,8 +2196,23 @@ switch it causes from counting for the others. Live TV's channel is read from
 `utp.boot/getLastChannelId` when Live TV leaves the foreground, since changing
 channel within it changes nothing in front, and when the catalogue is asked
 for while Live TV is still in front: on a G3 the view asks about 0.2 s before
-sam names it. The catalogue waits for that read. Only rows set to Last opened are
+sam names it. The catalogue waits for that read. Otherwise the TV tile and
+what was last on take the channel from the last read. Only rows set to Last opened are
 recorded, and a row going back to its own order is forgotten.
+
+A return to the view comes as a relaunch, the page shown again, or both, in
+either order; it runs once, and a second event within 2 s with no key
+pressed between takes only the relaunch's parameters (a guide or channel
+asked for), since running it again would close a guide the relaunch had just
+opened. A relaunch that came while the page was hidden has the wallpaper and
+the live preview follow once it shows. The view has one catalogue request out
+at a time, answering every caller; a heartbeat that finds the layout changed,
+or a closed channel picker that added channels, waits for a request sent
+after it, not one already out. What was last on and the two guides redraw the
+rows only when their replies changed, besides once a minute for the progress
+bars, and a redraw replaces only the rows whose markup changed: on a G3
+(webOS 9.2.2) every row replaced took 130 ms, at each programme change in the
+guide.
 
 Back on the view opens its Recent apps panel. LG's own is a view inside LG's
 Home with no way in from outside, so `lib/home-recent-apps.js` reads the same
@@ -2435,3 +2540,6 @@ removing the target from the list clears it. Clear all is disabled when the
 gallery is empty. Deletion uses one busy state to prevent overlapping writes.
 Delete buttons stay disabled during a write without temporarily dimming.
 Changed lists preserve focus on a surviving card's button.
+### Color-key shortcuts on webOS 11
+
+`remotekeys.js` offers the four colors when the native key-filter path and the existing remote-button input reader are available. Assignments use the same `remotekeys.json` map, picker and backup part as other keys. `tvweb.js` passes physical button events to `handleColorButton`; `startColorButtons` restores the worker owner before the periodic native-key check. Only Linux codes 398–401 launch a target: the delayed Qt copies from `inputcommon` are ignored. The worker is wanted independently of MQTT while any color is set and released after the last shortcut is cleared or all keys restored. Nothing is offered because observing a press cannot consume its original action. No native library or LG key assignment is changed.

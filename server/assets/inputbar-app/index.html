@@ -58,7 +58,7 @@ html,body{width:1920px;height:1080px;background:transparent;overflow:hidden;font
  * icon (a sun of the same 4 px stroke and 36 px height as its speaker) before the digits.
  */
 #osdv{position:absolute;right:57px;top:calc(50% - 1px);-webkit-transform:translateY(-50%);transform:translateY(-50%);
-  display:-webkit-flex;display:flex;-webkit-align-items:center;align-items:center;opacity:0;
+  display:-webkit-flex;display:flex;-webkit-align-items:center;align-items:center;opacity:0;pointer-events:none;
   -webkit-transition:opacity .15s linear;transition:opacity .15s linear}
 /* It appears at once and fades out over 150 ms (LG's fadeAnimationDuration); a cut out reads as a pop. */
 .osdon #osdv{opacity:1;-webkit-transition:none;transition:none}
@@ -74,7 +74,7 @@ html,body{width:1920px;height:1080px;background:transparent;overflow:hidden;font
 #osdv .vfill{position:absolute;left:-1px;bottom:2px;width:18px;height:0;border-radius:9px;background:#e4e7e6}
 /* Centred, and as wide as its parts, which do not change with the level. */
 #osd{position:absolute;left:50%;bottom:80px;height:80px;border-radius:40px;-webkit-transform:translateX(-50%);transform:translateX(-50%);
-  background:rgba(34,34,36,.94);opacity:0;display:-webkit-flex;display:flex;
+  background:rgba(34,34,36,.94);opacity:0;pointer-events:none;display:-webkit-flex;display:flex;
   -webkit-align-items:center;align-items:center;padding:0 32px;
   -webkit-transition:opacity .16s ease-out;transition:opacity .16s ease-out}
 .osdon #osd{opacity:1}
@@ -325,8 +325,12 @@ html,body{width:1920px;height:1080px;background:transparent;overflow:hidden;font
 
   // A tile as drawn: kept with the input, so the last bar can be drawn again
   // at once on the next open, before the server has answered.
-  function entry(d) {
-    return { id: d.id, name: d.name, tuner: !!d.tuner, port: d.port, input: d.input, uniqueId: d.uniqueId,
+  // words: the catalogue's text, in the TV's language (lib/home.js catalogueText).
+  function entry(d, words) {
+    var name = !d.defaultName && (d.kind === 'allinputs' && words.allInputs || d.kind === 'screenshare' && words.screenShare) || d.name;
+    var kindText = d.kind === 'dms' ? words.mediaServer || 'Media server'
+      : d.kind === 'component' ? words.component || 'Component' : '';
+    return { id: d.id, name: name, kindText: kindText, tuner: !!d.tuner, port: d.port, input: d.input, uniqueId: d.uniqueId,
              kind: d.kind || null, appId: d.appId || null, deviceId: d.deviceId || null,
              icon: window.glasshouseDevIcon(d) };
   }
@@ -338,9 +342,9 @@ html,body{width:1920px;height:1080px;background:transparent;overflow:hidden;font
     list.forEach(function (e, i) {
       if (twoRow && i === cols) html += '<br>';
       var cls = 'tile' + (i === focus ? ' focus' : '') + (isOn(e) ? ' now' : '');
-      var sub = e.kind === 'dms' ? 'Media Server'
+      var sub = e.kind === 'dms' || e.kind === 'component' ? e.kindText
         : e.kind === 'usb' ? 'USB'
-        : e.kind === 'av' ? 'AV' : e.kind === 'component' ? 'Component'
+        : e.kind === 'av' ? 'AV'
         : (e.tuner || e.kind) ? ''
         : 'HDMI ' + e.port;
       html += '<div class="' + cls + '" data-i="' + i + '"' + style + '><div class="head">' + e.icon +
@@ -390,12 +394,29 @@ html,body{width:1920px;height:1080px;background:transparent;overflow:hidden;font
     e.preventDefault();
   }, true);
   // The Magic Remote's pointer: hovering a tile focuses it, clicking switches.
+  function tileIndex(target, root) {
+    var el = target;
+    while (el && el !== root && !el.getAttribute('data-i')) el = el.parentNode;
+    return el && el !== root ? +el.getAttribute('data-i') : null;
+  }
+  var lastPtrX = -1, lastPtrY = -1;
   $('tiles').addEventListener('mouseover', function (e) {
-    var el = e.target;
-    while (el && el !== this && !el.getAttribute('data-i')) el = el.parentNode;
-    if (el && el !== this) setFocus(+el.getAttribute('data-i'));
+    var idx = tileIndex(e.target, this);
+    if (idx !== null) setFocus(idx);
   });
-  $('tiles').addEventListener('click', function () { choose(); });
+  $('tiles').addEventListener('mousemove', function (e) {
+    if (e.clientX === lastPtrX && e.clientY === lastPtrY) return;
+    lastPtrX = e.clientX;
+    lastPtrY = e.clientY;
+    var idx = tileIndex(e.target, this);
+    if (idx !== null) setFocus(idx);
+  });
+  $('tiles').addEventListener('click', function (e) {
+    var idx = tileIndex(e.target, this);
+    if (idx === null) return;
+    setFocus(idx);
+    choose();
+  });
   var CACHE = 'glasshouse.inputbar';
   var moved = false, waiting = 0, now = null, cat = null;
   function focusOn() {
@@ -413,7 +434,8 @@ html,body{width:1920px;height:1080px;background:transparent;overflow:hidden;font
   function ready() {
     if (--waiting > 0 || closing) return;
     if (!cat || !window.glasshouseDevIcon) { if (!list.length) close(); return; }
-    var fresh = inputsFrom(cat).map(entry);
+    var words = cat.text || {};
+    var fresh = inputsFrom(cat).map(function (d) { return entry(d, words); });
     if (!fresh.length) return close();
     var port = now && now.kind === 'input' ? now.port : (now && now.kind === 'channel' ? 'tuner' : null);
     var devs = now && now.kind === 'input' && Array.isArray(now.devices) ? now.devices : null;

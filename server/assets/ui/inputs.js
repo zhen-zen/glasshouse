@@ -18,7 +18,7 @@ async function loadInputs() {
 }
 
 function renderInputs() {
-  const shown = [renderInputBar(), renderInputList(), renderNoSignal()];
+  const shown = [renderInputBar(), renderInputList(), renderNoSignal(), renderInputBanner()];
   q('inputs-none').hidden = shown.some(Boolean);
 }
 
@@ -191,7 +191,7 @@ function renderInputsPreview(kind) {
   }
   if (kind === 'nslg') {
     return `<span class="hm-s hm-s-nslg">
-      <span class="hm-nslg-box"><b>No Signal</b><i></i><i></i></span>
+      <span class="hm-nslg-box"><b>${esc(t('inputs.noSignal.screen', 'No Signal'))}</b><i></i><i></i></span>
     </span>`;
   }
   if (kind === 'nsicon') {
@@ -208,7 +208,7 @@ function renderInputsPreview(kind) {
   if (kind === 'nsart') {
     return `<span class="hm-s hm-s-nsart"><span class="hm-nsart-pic"><i></i></span></span>`;
   }
-  return `<span class="hm-s hm-s-nsplain"><span class="hm-nsplain-txt">No Signal</span></span>`;
+  return `<span class="hm-s hm-s-nsplain"><span class="hm-nsplain-txt">${esc(t('inputs.noSignal.screen', 'No Signal'))}</span></span>`;
 }
 
 function setInputsCard(btn, kind, title, sub, active, disabled) {
@@ -300,6 +300,31 @@ function renderNoSignal() {
   q('inputs-nosignal-art').hidden = !ns.art && mode !== 'art';
   setInputsCard(q('inputs-nosignal-art'), 'nsart', t('inputs.noSignal.art', 'Picture frame'),
     t('inputs.noSignal.artDesc2', 'The picture frame\u2019s pictures, with \u201cNo Signal\u201d on each picture\u2019s label.'), mode === 'art', !writable);
+  const customBox = q('inputs-nosignal-custom');
+  const customList = Array.isArray(ns.customScreens) ? ns.customScreens : [];
+  if (customBox) {
+    customBox.hidden = !customList.length;
+    customBox.innerHTML = customList.map(s => {
+      const isCur = mode === s.localId;
+      const meta = [
+        s.author ? t('ss.by', 'by {author}', { author: s.author }) : '',
+        s.version ? 'v' + s.version : '',
+        s.license || ''
+      ].filter(Boolean).join(' \u00b7 ');
+      const desc = s.problem
+        ? `<div class="pv-note warn">${esc(s.problem)}</div>`
+        : `${s.description ? `<div class="prot-desc">${esc(s.description)}</div>` : ''}${Array.isArray(s.cautions) && s.cautions.length ? `<div class="prot-desc">${esc(s.cautions.join(' '))}</div>` : ''}${meta ? `<div class="prot-desc">${esc(meta)}</div>` : ''}`;
+      const btn = isCur
+        ? `<button type="button" class="pill good" disabled>${esc(t('ss.inUse', 'In use'))}</button>`
+        : `<button type="button" class="pill idle" ${!writable || s.problem ? 'disabled' : ''} onclick="setNoSignal('${esc(s.localId)}')">${esc(t('community.use', 'Use'))}</button>`;
+      return `<div class="prot-row"><div class="prot-main"><div class="prot-title">${esc(s.label || s.id)}</div>${desc}</div><div class="prot-status">${btn}</div></div>`;
+    }).join('');
+  }
+  const commDisc = q('disc-ns-community');
+  if (commDisc) {
+    commDisc.hidden = !ns.custom && !ns.art;
+    if (!commDisc.hidden && commDisc.open && typeof loadCommunity === 'function') loadCommunity('nosignal', false);
+  }
   // Its settings, shared with the Screensaver tab; what it shows now, while it is the No Signal screen.
   const frame = q('inputs-frame');
   frame.hidden = !ns.art && mode !== 'art';
@@ -307,18 +332,48 @@ function renderNoSignal() {
   if (!frame.hidden && typeof frameLoad === 'function') frameLoad(true);
   const desc = q('inputs-nosignal-desc');
   desc.hidden = !ns.restartPending;
-  desc.textContent = ns.restartPending
-    ? t('ss.noSignal.pending', 'It takes effect once no input with a picture is on screen, such as at the Home screen.')
-    : '';
+  desc.textContent = !ns.restartPending ? ''
+    : ns.heldBy
+      ? t('ss.noSignal.pendingBehind', 'It takes effect once {input} is closed: it is open behind another app, and the TV\u2019s input app restarts to show the new screen, which could leave that input blank.', { input: ns.heldBy })
+      : t('ss.noSignal.pending', 'It takes effect once no input with a picture is on screen, such as at the Home screen.');
   return true;
+}
+
+// Closing LG's input banner, for the remote to reach an HDMI device at once.
+function renderInputBanner() {
+  const grp = q('inputs-grp-banner');
+  const ib = inputsData && inputsData.inputBanner;
+  grp.hidden = !ib;
+  if (!ib) return false;
+  const btn = q('btn_close_banner');
+  btn.textContent = ib.closeBanner ? t('common.on', 'On') : t('common.off', 'Off');
+  btn.className = 'pill ' + (ib.closeBanner ? 'good' : 'idle');
+  btn.disabled = !(inputsData && inputsData.writable);
+  return true;
+}
+
+async function toggleCloseBanner() {
+  const ib = inputsData && inputsData.inputBanner;
+  if (!ib) return;
+  const btn = q('btn_close_banner');
+  btn.disabled = true;
+  const r = await sendCommand('closeInputBanner', !ib.closeBanner);
+  if (r && r.ok && r.inputBanner) inputsData.inputBanner = r.inputBanner;
+  renderInputBanner();
 }
 
 async function setNoSignal(mode) {
   const ns = (inputsData && inputsData.noSignal) || {};
   const cur = ns.mode || (ns.on ? 'plain' : 'lg');
-  const next = mode === 'icon' || mode === 'plain' || mode === 'art' ? mode : 'lg';
+  const isCustom = typeof mode === 'string' && mode.indexOf('user-') === 0;
+  const next = mode === 'icon' || mode === 'plain' || mode === 'art' || isCustom ? mode : 'lg';
   if (cur === next) return;
   q('inputs-nosignal-lg').disabled = q('inputs-nosignal-plain').disabled = q('inputs-nosignal-icon').disabled = q('inputs-nosignal-art').disabled = true;
+  const customBox = q('inputs-nosignal-custom');
+  if (customBox) customBox.querySelectorAll('button').forEach(b => { b.disabled = true; });
   await sendCommand('plainNoSignal', next);
-  loadInputs();
+  await loadInputs();
+  if (typeof commState === 'object' && commState.nosignal && commState.nosignal.loaded && typeof loadCommunity === 'function') {
+    loadCommunity('nosignal', false);
+  }
 }

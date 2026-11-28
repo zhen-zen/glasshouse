@@ -8,6 +8,7 @@ var zlib = require('zlib');
 var crypto = require('crypto');
 var http = require('http');
 var say = require('./say');
+var lutSlots = require('./lutslots');
 var localAddress4 = require('./util').localAddress4;
 var localAddress6 = require('./util').localAddress6;
 var listenDualStack = require('./util').listenDualStack;
@@ -24,12 +25,16 @@ var fetchLib = require('./fetch');
 var devtools = require('./devtools');
 var names = require('./names');
 var nosignal = require('./nosignal');
+/** @type {typeof import('./soundbar')} */
+var soundbar = require('./soundbar');
+var soundbarChanging = false;
 
 var HA_CATEGORIES = ha.HA_CATEGORIES;
 var HA_ENTITIES = ha.HA_ENTITIES;
 
 var MIME = {
   '.html': 'text/html; charset=utf-8',
+  '.qml': 'text/plain; charset=utf-8',
   '.otf': 'font/otf', '.ttf': 'font/ttf', '.woff2': 'font/woff2',
   '.css': 'text/css; charset=utf-8', '.js': 'application/javascript',
   '.json': 'application/json; charset=utf-8',
@@ -85,6 +90,8 @@ var appDnsModule = null;
 var quickAccessModule = null;
 /** @type {typeof import('./remotekeys')} */
 var remoteKeysModule = null;
+/** @type {typeof import('./remotedetect')} */
+var remoteDetectModule = null;
 /** @type {typeof import('./homescreen')} */
 var homeScreenModule = null;
 /** @type {typeof import('./home')} */
@@ -107,8 +114,12 @@ var screensaversModule = null;
 var audioLevelsModule = null;
 /** @type {typeof import('./haentity')} */
 var haEntityModule = null;
+/** @type {typeof import('./habar') | null} */
+var haBarModule = null;
 /** @type {typeof import('./inputbar')} */
 var inputBarModule = null;
+/** @type {typeof import('./inputbanner')} */
+var inputBannerModule = null;
 /** @type {typeof import('./ask')} */
 var askModule = null;
 /** @type {typeof import('./updater')} */
@@ -119,6 +130,8 @@ var tvAppFn = null;
 var restartSelfFn = null;
 /** @type {typeof import('./repo')} */
 var repoModule = null;
+/** @type {typeof import('./catalog') | null} */
+var catalogModule = null;
 /** @type {typeof import('./installer')} */
 var installerModule = null;
 /** @type {typeof import('./prometheus')} */
@@ -130,6 +143,9 @@ var ntpModule = null;
 /** @type {typeof import('./history')} */
 var historyModule = null;
 var perfHistoryModule = null;
+var barPressModule = null;
+// The palmbus switch's state and report links (palmbusInfo in tvweb.js).
+var palmbusInfoFn = null;
 var storageScanModule = null;
 /** @type {typeof import('./sysinfo')} */
 var sysinfoModule = null;
@@ -138,18 +154,6 @@ var screenColourModule = null;
 /** @type {typeof import('./power')} */
 var powerModule = null;
 
-// HDMI inputs the TV's input service calls plugged in, with no powered source
-// on the cable and no picture, as the HDMI view sees them (telemetry).
-function markNoSignal(c, done) {
-  if (!c || !Array.isArray(c.devices) || !telemetryModule || typeof telemetryModule.hdmiSignalByInput !== 'function') return done();
-  telemetryModule.hdmiSignalByInput(function (byInput) {
-    c.devices.forEach(function (d) {
-      var sig = d && !d.unused && !d.kind && d.port ? byInput[d.port] : null;
-      if (sig && !sig.powered && !sig.locked) d.noSignal = true;
-    });
-    done();
-  });
-}
 /** @type {typeof import('./sshkeys')} */
 var sshKeysModule = null;
 /** @type {typeof import('./screentime')} */
@@ -195,9 +199,12 @@ var SETUP_PENDING = '/var/lib/tvweb/.setup-pending';
 var HANDOFF = { server: null, code: null, timer: null };
 var HANDOFF_MS = 10 * 60 * 1000;
 
+// The page as sent: gzipped where node can, with the text kept only where it cannot.
 var UI_HTML = null;
 var UI_HTML_GZ = null;
 var UI_ETAG = null;
+// Where the gzipped page is kept between starts (loadUI), or null for none.
+var uiCacheDir = null;
 var UI_MISSING = 'ui.html';   // the file named by the missing-assets page
 var ASSET_CACHE = {};
 
@@ -258,15 +265,117 @@ function setupPending() {
  * prometheus.enabled are writable from the Server tab, and iconServer from the
  * MQTT tab: its port answers nothing but the icons the dashboard serves.
  */
+/*
+ * config.json as it is on disk, {} where there is none yet, or null where it
+ * is there but cannot be read. A writer given null refuses: writing a setting
+ * into {} would replace the whole file with that one setting.
+ */
 function readConfigFile() {
+  if (!configFilePath || !fs.existsSync(configFilePath)) return {};
   try {
-    if (configFilePath && fs.existsSync(configFilePath)) {
-      return JSON.parse(fs.readFileSync(configFilePath, 'utf8'));
-    }
+    return JSON.parse(fs.readFileSync(configFilePath, 'utf8'));
   } catch (e) {
-    console.warn('config: could not re-read ' + configFilePath + ': ' + e.message);
+    console.error('config: could not read ' + configFilePath + ': ' + e.message);
+    return null;
   }
-  return {};
+}
+
+function unreadableConfigError() {
+  return new Error(msg('srv.configUnreadable', '{file} could not be read, so it was left as it is. Correct it, or remove it to start again, then restart Glasshouse.', { file: configFilePath }));
+}
+
+function soundbarSelection() {
+  var target = config.soundbar || {};
+  return { host: target.host || '', id: target.id || '', writable: !!config.allowControl };
+}
+
+function soundbarEvents(req, res) {
+  if (req.method !== 'GET') return send(res, 405, JSON.stringify({ ok: false }));
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store',
+    'X-Accel-Buffering': 'no', 'X-Content-Type-Options': 'nosniff' });
+  var closed = false, heartbeat, unsubscribe;
+  function cleanup() {
+    if (closed) return;
+    closed = true;
+    clearInterval(heartbeat);
+    if (unsubscribe) unsubscribe();
+  }
+  function writable() {
+    if (!res.writable || res.finished) cleanup();
+    return !closed;
+  }
+  // Since Node 16, request close can mean that the GET finished reading
+  // while its response stream is still open. Older TV runtimes signal a disconnect.
+  req.on('close', function () {
+    if (parseInt(process.versions.node, 10) < 16 || !req.socket || req.socket.destroyed) cleanup();
+  });
+  res.on('close', cleanup);
+  res.on('finish', cleanup);
+  if (!writable()) return;
+  res.write('retry: 1500\n\nevent: selection\ndata: ' + JSON.stringify(soundbarSelection()) + '\n\n');
+  if (!writable()) return;
+  if (!config.soundbar || !config.soundbar.id) return res.end();
+  heartbeat = setInterval(function () { if (writable()) res.write(': keepalive\n\n'); }, 20000);
+  if (heartbeat.unref) heartbeat.unref();
+  unsubscribe = soundbar.watch(config.soundbar, function (reason, device) {
+    if (!writable()) return;
+    if (reason) {
+      cleanup();
+      return res.end('event: fault\ndata: ' + JSON.stringify(reason) + '\n\n');
+    }
+    res.write('data: ' + JSON.stringify(device) + '\n\n');
+  });
+  // watch can report a failed address before returning its unsubscribe function.
+  if (closed) unsubscribe();
+}
+
+function handleSoundbar(req, res) {
+  function reply(status, error, current) {
+    var result = soundbarSelection();
+    send(res, status, JSON.stringify({ host: result.host, id: result.id, writable: result.writable,
+      ok: !error, reason: error, device: current || null }));
+  }
+  if (req.method === 'GET') {
+    if (!config.soundbar || !config.soundbar.host) return reply(200);
+    return soundbar.request(config.soundbar, null, function (err, current) {
+      reply(err ? 502 : 200, err, current);
+    });
+  }
+  if (req.method !== 'POST') return reply(405, 'method');
+  if (!config.allowControl) return reply(403, 'disabled');
+  return readJsonBody(req, res, function (body) {
+    if (soundbarChanging) return reply(409, 'busy');
+    var target = config.soundbar || {};
+    if (body.id !== (target.id || '')) return reply(409, 'identity');
+    function save(selection, current) {
+      writeSettings({ soundbar: selection }, function (err) {
+        soundbarChanging = false;
+        if (err) return reply(500, 'save');
+        config.soundbar = selection;
+        if (target.id && (!selection || target.id !== selection.id || target.host !== selection.host)) soundbar.forget(target);
+        reply(200, null, current);
+      });
+    }
+    var forgetting = body.action === 'forget';
+    var pairing = body.action === 'connect';
+    if (!forgetting && !pairing && (body.action !== 'set' || !target.id)) return reply(400, 'invalid');
+    soundbarChanging = true;
+    if (forgetting) return save(null);
+    function done(err, current) {
+      if (!err && pairing) return save({ host: current.host, id: current.id }, current);
+      soundbarChanging = false;
+      reply(err === 'address' || err === 'invalid' ? 400 : err ? 502 : 200, err, current);
+    }
+    if (!pairing) return soundbar.request(target, body, done);
+    // Connecting again to the selected bar reads through its open session rather
+    // than opening a second socket. Another bar now at that address fails the
+    // identity check there and is then paired on its own.
+    if (!target.id || target.host !== body.host) return soundbar.request({ host: body.host }, null, done);
+    soundbar.request(target, null, function (err, current) {
+      if (err === 'identity') return soundbar.request({ host: body.host }, null, done);
+      done(err, current);
+    });
+  });
 }
 
 function trimmedString(v) { return typeof v === 'string' ? v.trim() : ''; }
@@ -367,6 +476,7 @@ function validateHaSettings(haObj) {
     var haTok = trimmedString(haObj.token);
     if (haTok || haObj.clearToken) out.token = haTok;
   }
+  if (typeof haObj.tlsRejectUnauthorized === 'boolean') out.tlsRejectUnauthorized = haObj.tlsRejectUnauthorized;
   return { errors: errors, value: out };
 }
 
@@ -376,11 +486,13 @@ function applyHaConfig(haPatch) {
   if (haPatch.enabled !== undefined) config.homeAssistant.enabled = haPatch.enabled;
   if (haPatch.url !== undefined) config.homeAssistant.url = haPatch.url;
   if (haPatch.token !== undefined) config.homeAssistant.token = haPatch.token;
+  if (haPatch.tlsRejectUnauthorized !== undefined) config.homeAssistant.tlsRejectUnauthorized = haPatch.tlsRejectUnauthorized;
   if (haEntityModule) haEntityModule.update(config.homeAssistant);
 }
 
 function writeSettings(patch, cb) {
   var file = readConfigFile();
+  if (!file) return cb(unreadableConfigError());
   for (var section in patch) {
     if (patch[section] !== null && typeof patch[section] === 'object' && !Array.isArray(patch[section])) {
       file[section] = file[section] || {};
@@ -404,6 +516,7 @@ function writeSettings(patch, cb) {
  */
 function setNetworkAccess(open, cb) {
   var file = readConfigFile();
+  if (!file) return cb(unreadableConfigError());
   // Unset, host defaults to dual-stack '::'.
   if (open) delete file.host;
   else file.host = '127.0.0.1';
@@ -468,6 +581,8 @@ function handoffUrl() {
  */
 function ownIdentity() {
   var file = readConfigFile();
+  // Unreadable, it may well hold an identity: none is made up over it.
+  if (!file) return null;
   var fm = file.mqtt || {};
   // One already set up keeps what it has, defaults included: its entities in
   // Home Assistant are named from it.
@@ -602,7 +717,7 @@ function handoffRequest(req, res) {
 
 function startHandoff(cb) {
   if (HANDOFF.server) return cb(null, handoffUrl());
-  if (!localAddress4()) return cb(new Error('this TV has no network address'));
+  if (!localAddress4()) return cb(new Error(msg('srv.setup.noAddress', 'this TV has no network address')));
   var code = crypto.randomBytes(8).toString('hex');
   var srv = http.createServer(handoffRequest);
   // IPv4-only if the dashboard is; dual-stack otherwise, even when the
@@ -693,9 +808,10 @@ function preloadWithIcons(cb) {
  * its scripts left as files, which a browser keeps from before an update, so
  * the dashboard showed new controls driven by old script.
  */
-function inlineUI(html) {
+function inlineUI(html, used) {
   var missing = null;
   function part(rel) {
+    if (used) used.push(rel);
     var f = assetPath(rel);
     if (f) {
       try { return fs.readFileSync(f, 'utf8'); } catch (e) {}
@@ -714,6 +830,60 @@ function inlineUI(html) {
   return html;
 }
 
+/*
+ * The page put together is 1.35 million characters, kept by V8 at two bytes
+ * each, and gzipping it took 0.4 s on a B8 (node 0.12) at every start, with
+ * 3.7 MB more held for good: node 0.12 keeps its heap at its peak. So the
+ * gzipped page is kept on disk, made once for each set of files it is made
+ * from, and a start that finds it reads 340 KB and makes nothing.
+ *
+ * The files are told apart by their bytes, read as buffers and never as text,
+ * with where each was found, the version and how they are put together.
+ */
+var UI_CACHE_GZ = 'ui-page.gz';
+var UI_CACHE_META = 'ui-page.json';
+
+function uiSources(parts) {
+  var hash = crypto.createHash('sha1');
+  hash.update(versionStr + '\n' + inlineUI.toString() + '\n');
+  var files = ['ui.html'].concat(parts);
+  for (var i = 0; i < files.length; i++) {
+    var f = assetPath(files[i]);
+    if (!f) return null;
+    try { hash.update(f + '\n'); hash.update(fs.readFileSync(f)); } catch (e) { return null; }
+  }
+  return hash.digest('hex');
+}
+
+function readUiCache() {
+  if (!uiCacheDir || typeof zlib.gzipSync !== 'function') return null;
+  var meta = readJsonSafe(path.join(uiCacheDir, UI_CACHE_META));
+  if (!meta || typeof meta.sources !== 'string' || typeof meta.etag !== 'string' || !Array.isArray(meta.parts)) return null;
+  if (uiSources(meta.parts) !== meta.sources) return null;
+  try { return { gz: fs.readFileSync(path.join(uiCacheDir, UI_CACHE_GZ)), etag: meta.etag }; } catch (e) { return null; }
+}
+
+function writeUiCache(gz, etag, parts) {
+  if (!uiCacheDir) return;
+  var sources = uiSources(parts);
+  if (!sources) return;
+  var gzFile = path.join(uiCacheDir, UI_CACHE_GZ), metaFile = path.join(uiCacheDir, UI_CACHE_META);
+  try {
+    // The page first, then what it was made from: a start between the two finds no match.
+    try { fs.unlinkSync(metaFile); } catch (e) {}
+    fs.writeFileSync(gzFile + '.tmp', gz);
+    fs.renameSync(gzFile + '.tmp', gzFile);
+    fs.writeFileSync(metaFile + '.tmp', JSON.stringify({ sources: sources, etag: etag, parts: parts }));
+    fs.renameSync(metaFile + '.tmp', metaFile);
+  } catch (e) {
+    console.error('assets: could not keep the gzipped page: ' + e.message);
+  }
+}
+
+function readJsonSafe(f) {
+  try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return null; }
+}
+
 // Called only where something will serve it: not with the web dashboard off,
 // nor for a one-shot run such as --update.
 function loadUI() {
@@ -723,14 +893,24 @@ function loadUI() {
                   ' - the dashboard will report it is missing');
     return;
   }
+  var kept = readUiCache();
+  if (kept) {
+    UI_HTML = null;
+    UI_HTML_GZ = kept.gz;
+    UI_ETAG = kept.etag;
+    console.log('assets: serving ui.html from ' + f + ' (' + Math.round(UI_HTML_GZ.length / 1024) + ' KB compressed, kept from an earlier start)');
+    return;
+  }
   try {
-    var page = inlineUI(fs.readFileSync(f, 'utf8'));
+    var parts = [];
+    var page = inlineUI(fs.readFileSync(f, 'utf8'), parts);
     if (!page) {
       console.error('assets: ' + UI_MISSING + ' not found in ' + assetDirsList.join(', ') +
                     ' - the dashboard will report it is missing');
       return;
     }
     UI_HTML = page;
+    UI_HTML_GZ = null;
     // From the content, not the version: a deploy of uncommitted changes keeps
     // the version, and browsers would go on showing the page before them.
     UI_ETAG = '"' + crypto.createHash('sha1').update(page, 'utf8').digest('hex').slice(0, 16) + '"';
@@ -743,6 +923,9 @@ function loadUI() {
      */
     try {
       UI_HTML_GZ = zlib.gzipSync(UI_HTML);
+      // Sent gzipped from here on, and unzipped for the rare client that will not take it.
+      UI_HTML = null;
+      writeUiCache(UI_HTML_GZ, UI_ETAG, parts);
       console.log('assets: serving ui.html from ' + f + ' (' + Math.round(UI_HTML_GZ.length / 1024) + ' KB compressed)');
     } catch (ze) {
       console.log('assets: serving ui.html from ' + f);
@@ -762,6 +945,7 @@ function updateSummary() {
   s.allowNetworkDebugger = !!(config && config.allowNetworkDebugger);
   s.allowTileHiding = !!(appsModule && appsModule.tileHidingAllowed && appsModule.tileHidingAllowed());
   s.allowExperimentalScreensavers = !!(screensaversModule && screensaversModule.allowedAnyway && screensaversModule.allowedAnyway());
+  s.palmbus = palmbusInfoFn ? palmbusInfoFn() : null;
   s.pointer = {
     supported: !!(pointerModule && pointerModule.isSupported()),
     enabled: !!(pointerModule && pointerModule.isEnabled()),
@@ -957,7 +1141,7 @@ function isInstallRoute(pathname) {
 
 // A custom launcher runs as LG's Home app, so putting one in place is guarded as an install is.
 function needsAllowedHost(pathname) {
-  return isInstallRoute(pathname) || pathname.indexOf('/api/home/launcher') === 0;
+  return isInstallRoute(pathname) || pathname.indexOf('/api/home/launcher') === 0 || pathname.indexOf('/api/community') === 0;
 }
 
 function installError(res, text, status) {
@@ -1196,6 +1380,7 @@ function getSettingsPayload() {
       enabled: haCfg.enabled !== false,
       url: haCfg.url || '',
       tokenSet: !!haCfg.token,
+      tlsRejectUnauthorized: haCfg.tlsRejectUnauthorized !== false,
       configured: !!(haEntityModule && haEntityModule.configured()),
       status: (haEntityModule && typeof haEntityModule.status === 'function') ? haEntityModule.status() : null
     },
@@ -1318,23 +1503,7 @@ function handleHomeRoute(req, res, u, pathname) {
         }
       });
     }
-    if (pathname === '/api/home/catalogue') {
-      return homeModule.catalogue(function (c) {
-        // The Inputs tab's state for each HDMI input agrees with the HDMI
-        // view: plugged in by the TV's input service, but with no powered
-        // source on the cable and no picture, it is no signal, not connected.
-        markNoSignal(c, function () {
-          var st = homeModule.viewStatus();
-          c.ok = true;
-          c.layout = st.layout;
-          c.enabled = st.enabled;
-          c.supported = st.supported;
-          c.wallpapers = st.wallpapers;
-          c.layoutVersion = homeModule.layoutVersion();
-          reply(c);
-        });
-      });
-    }
+    if (pathname === '/api/home/catalogue') return homeModule.catalogueReply(reply);
     if (pathname === '/api/home/channels') {
       return homeModule.channelList(function (list) { reply({ ok: true, channels: list, tuner: !!list }); });
     }
@@ -1464,9 +1633,20 @@ function handleHomeRoute(req, res, u, pathname) {
     return readJsonBody(req, res, function (body) {
       if (pathname === '/api/home/layout') return homeModule.setLayout(body, reply);
       if (pathname === '/api/home/start-layout') return homeModule.setHideLgHomeAtStart(body, reply);
-      // Glasshouse Bar leaves LG's Home its place, so it is switched off first.
+      // Glasshouse Bar leaves LG's Home its place, so it is switched off. On
+      // takeover TVs, enable Glasshouse Home first so the Home key is not
+      // briefly handed back to LG's Home before takeover mounts it.
       if (pathname === '/api/home/enable') {
         if (!homebarModule || !homebarModule.enabled()) return homeModule.enable(reply);
+        if (typeof homeModule.isStandalone === 'function' && !homeModule.isStandalone()) {
+          return homeModule.enable(function (r) {
+            if (!r.ok) return reply(r);
+            homebarModule.disable(function (br) {
+              if (!br.ok) return homeModule.disable(function () { reply(br); });
+              reply(r);
+            });
+          });
+        }
         return homebarModule.disable(function (r) { if (!r.ok) return reply(r); homeModule.enable(reply); });
       }
       if (pathname === '/api/home/bar' && homebarModule) {
@@ -1564,18 +1744,19 @@ function handleIptvRoute(req, res, u, pathname) {
     if (pathname === '/api/iptv/stream') {
       // The play URL carries the login on Xtream: for the TV's own Home only.
       if (!fromTV(req)) return send(res, 403, JSON.stringify({ ok: false, error: 'forbidden' }));
-      // full=1: the full-screen player, which may play a recording it can pause (lib/iptv-timeshift).
+      // full=1: the full-screen player, which may play a recording it can pause (lib/iptv-timeshift);
+      // as=hls or ts: the channel's other kind of stream, for this play only.
       return iptvModule.playUrl(String(qs.pl || ''), String(qs.key || ''), qs.full === '1', function (stream) {
         if (!stream) return send(res, 404, JSON.stringify({ ok: false, error: 'no-stream' }));
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end(JSON.stringify({ ok: true, url: stream.url, format: stream.format, account: stream.account, maxConnections: stream.maxConnections,
-          switchable: stream.switchable, timeshift: stream.timeshift === true }));
-      });
+          switchable: stream.switchable, timeshift: stream.timeshift === true, relay: stream.relay || null }));
+      }, qs.as === 'hls' || qs.as === 'ts' ? qs.as : '');
     }
     if (pathname === '/api/iptv/relay') {
-      // A tuner's stream with the owner's login: for the TV's own Home only, like the play link.
+      // A channel's stream, with a tuner's login or for Home's own player: for the TV's own Home only, like the play link.
       if (!fromTV(req)) return send(res, 403, JSON.stringify({ ok: false, error: 'forbidden' }));
-      return iptvModule.relay(String(qs.pl || ''), String(qs.key || ''), req, res);
+      return iptvModule.relay(String(qs.pl || ''), String(qs.key || ''), req, res, qs.as === 'hls' || qs.as === 'ts' ? qs.as : '');
     }
     if (pathname === '/api/iptv/timeshift') {
       if (qs.pl === undefined) return iptvModule.timeshiftStatus(reply);
@@ -1637,13 +1818,27 @@ function acceptsGzip(acceptEncoding) {
   return wildcardAccepted;
 }
 
+/*
+ * The Home Assistant bar (assets/habar.html, bar=1) loads no translation file,
+ * so its answers come in the TV's menu language, as i18n.js would have picked
+ * from the TV's browser. Glasshouse Home asks the same routes in its own
+ * language. Returns the TV's locale for the bar, or null for anything else.
+ */
+function barAsks(u, res) {
+  if (!u.query || u.query.bar !== '1') return null;
+  var locale = clockModule && clockModule.qtLocale ? String(clockModule.qtLocale() || '') : '';
+  var r = /** @type {any} */ (res);
+  if (!r.glasshouseLang) r.glasshouseLang = say.langOfLocale(locale);
+  return locale;
+}
+
 function handleRequest(req, res) {
   var u = parseUrl(req.url);
   var pathname = u.pathname;
   /** @type {any} */ (res).glasshouseLang = say.langOf(req);
 
   if (pathname === '/' || pathname === '/index.html') {
-    if (UI_HTML) {
+    if (UI_HTML || UI_HTML_GZ) {
       var gzip = !!UI_HTML_GZ && acceptsGzip(req.headers && req.headers['accept-encoding']);
       // no-cache, not no-store: the browser keeps the page and asks each
       // time, and an unchanged one comes back as a 304 with no body.
@@ -1656,9 +1851,9 @@ function handleRequest(req, res) {
         res.writeHead(304, uiHeaders);
         return res.end();
       }
-      var uiBody = gzip ? UI_HTML_GZ : UI_HTML;
+      var uiBody = gzip ? UI_HTML_GZ : (UI_HTML !== null ? UI_HTML : zlib.gunzipSync(UI_HTML_GZ));
       uiHeaders['Content-Type'] = 'text/html; charset=utf-8';
-      uiHeaders['Content-Length'] = gzip ? UI_HTML_GZ.length : Buffer.byteLength(UI_HTML);
+      uiHeaders['Content-Length'] = typeof uiBody === 'string' ? Buffer.byteLength(uiBody) : uiBody.length;
       if (gzip) uiHeaders['Content-Encoding'] = 'gzip';
       uiHeaders['X-Content-Type-Options'] = 'nosniff';
       uiHeaders['Referrer-Policy'] = 'no-referrer';
@@ -1711,6 +1906,26 @@ function handleRequest(req, res) {
     });
   }
 
+  // Community No Signal screens (lib/nosignal) served to com.webos.app.inputcommon over loopback (or with token).
+  if (pathname.indexOf('/nosignal/') === 0 && nosignal) {
+    if (!authed(u.query, req)) return send(res, 401, JSON.stringify({ ok: false, error: 'unauthorised' }));
+    var nsParts = pathname.slice('/nosignal/'.length).split('/');
+    var nsId = nsParts.shift() || '';
+    var nsRel = nsParts.join('/');
+    try { nsRel = decodeURIComponent(nsRel); } catch (e) { nsRel = ''; }
+    var nsHit = nosignal.resolve(nsId, nsRel);
+    if (!nsHit) return send(res, 404, JSON.stringify({ ok: false, error: 'not found' }));
+    var nsExt = path.extname(nsHit.file).toLowerCase();
+    var nsHeaders = { 'Content-Type': MIME[nsExt] || 'application/octet-stream', 'Cache-Control': 'no-store' };
+    return fs.stat(nsHit.file, function (nsErr, nsSt) {
+      if (nsErr) return send(res, 404, JSON.stringify({ ok: false, error: 'not found' }));
+      nsHeaders['Content-Length'] = nsSt.size;
+      res.writeHead(200, nsHeaders);
+      if (req.method === 'HEAD') return res.end();
+      fs.createReadStream(nsHit.file).on('error', function () { res.end(); }).pipe(res);
+    });
+  }
+
   if (pathname.indexOf('/assets/') === 0) {
     var file = assetPath(pathname.slice('/assets/'.length));
     if (!file) return send(res, 404, JSON.stringify({ ok: false, error: 'not found' }));
@@ -1729,6 +1944,8 @@ function handleRequest(req, res) {
     var respondWithEntry = function (entry) {
       var etag = '"' + (displayVersionStr || '1') + '-' + entry.raw.length.toString(16) + '"';
       var assetHeaders = { 'ETag': etag, 'Cache-Control': cacheHdr };
+      // Packaged TV overlay apps (file://) load bundled fonts over loopback.
+      if (ext === '.ttf' && fromTV(req)) assetHeaders['Access-Control-Allow-Origin'] = '*';
       if (compressible) assetHeaders['Vary'] = 'Accept-Encoding';
       if (req.headers && req.headers['if-none-match'] === etag) {
         res.writeHead(304, assetHeaders);
@@ -1808,6 +2025,9 @@ function handleRequest(req, res) {
     });
   }
 
+  if (pathname === '/api/audio/soundbar') return handleSoundbar(req, res);
+  if (pathname === '/api/audio/soundbar/events') return soundbarEvents(req, res);
+
   if (pathname === '/api/audio' && audioModule) {
     if (req.method === 'GET') {
       return audioModule.status(function (r) {
@@ -1858,7 +2078,8 @@ function handleRequest(req, res) {
       ok: true,
       writable: !!config.allowControl,
       noSignal: nosignal.status(),
-      inputBar: inputBarModule ? inputBarModule.summary() : null
+      inputBar: inputBarModule ? inputBarModule.summary() : null,
+      inputBanner: inputBannerModule ? inputBannerModule.summary() : null
     }));
   }
 
@@ -1962,6 +2183,37 @@ function handleRequest(req, res) {
     return send(res, 200, JSON.stringify(ssList));
   }
 
+  if (pathname === '/api/community' && req.method === 'GET' && catalogModule) {
+    if (!authed(u.query, req)) return send(res, 401, JSON.stringify({ ok: false, error: 'unauthorised' }));
+    return catalogModule.list({
+      kind: u.query && u.query.kind,
+      refresh: u.query && u.query.refresh === '1',
+      sideloadVia: sideloadVia(req)
+    }, function (r) {
+      send(res, r.ok ? 200 : 500, JSON.stringify(r));
+    });
+  }
+  if ((pathname === '/api/community/install' || pathname === '/api/community/remove') && catalogModule) {
+    if (!postGuard(req, res, 'application/json', true)) return;
+    return readJsonBody(req, res, function (body) {
+      var kind = body && body.kind;
+      if (pathname === '/api/community/install') {
+        if (body && typeof body.url === 'string' && body.url.trim()) {
+          if (!sideloadVia(req)) return sideloadRefused(res);
+          return catalogModule.installFromUrl(kind, body.url, function (r) {
+            send(res, r.ok ? 200 : 400, JSON.stringify(r));
+          });
+        }
+        return catalogModule.installFromCatalog(kind, body && body.id, function (r) {
+          send(res, r.ok ? 200 : 400, JSON.stringify(r));
+        });
+      }
+      return catalogModule.remove(kind, body && body.id, function (r) {
+        send(res, r.ok ? 200 : 400, JSON.stringify(r));
+      });
+    }, 4096);
+  }
+
   /* Everything the staged screen saver declared, in one answer. The saver is
      handed this one address instead of a URL per value, so a saver with eight
      readings makes one request. Only what that saver declared is served, and
@@ -2055,9 +2307,9 @@ function handleRequest(req, res) {
     }
     return readJsonBody(req, res, function (body) {
       if (!haEntityModule) return send(res, 503, JSON.stringify({ ok: false, error: 'Home Assistant module not loaded' }));
-      var testUrl = body && body.url;
-      var testToken = body && body.token;
-      haEntityModule.test({ url: testUrl, token: testToken }, function (r) {
+      var testOpts = { url: body && body.url, token: body && body.token };
+      if (body && typeof body.tlsRejectUnauthorized === 'boolean') testOpts.tlsRejectUnauthorized = body.tlsRejectUnauthorized;
+      haEntityModule.test(testOpts, function (r) {
         send(res, r.ok ? 200 : 400, JSON.stringify(r));
       });
     });
@@ -2086,6 +2338,7 @@ function handleRequest(req, res) {
           enabled: config.homeAssistant.enabled !== false,
           url: config.homeAssistant.url || '',
           tokenSet: !!(config.homeAssistant.token),
+          tlsRejectUnauthorized: config.homeAssistant.tlsRejectUnauthorized !== false,
           configured: haEntityModule.configured(),
           status: (typeof haEntityModule.status === 'function') ? haEntityModule.status() : null
         }));
@@ -2105,6 +2358,121 @@ function handleRequest(req, res) {
         entities: r.entities || [],
         error: r.error
       }));
+    });
+  }
+
+  if (pathname === '/api/ha/bar' && req.method === 'GET' && haBarModule) {
+    if (!authed(u.query, req)) return send(res, 401, JSON.stringify({ ok: false, error: 'unauthorized' }));
+    var haBarCfg = haBarModule.listConfig();
+    return send(res, 200, JSON.stringify({
+      ok: true,
+      configured: !!(haEntityModule && haEntityModule.configured()),
+      inHomeBar: !!(homeModule && homeModule.haBarInHomeBar()),
+      homeBarOffered: !!(homebarModule && homebarModule.status().offered),
+      entities: haBarCfg.entities,
+      showHints: haBarCfg.showHints
+    }));
+  }
+
+  if (pathname === '/api/ha/bar' && req.method === 'POST' && haBarModule) {
+    if (!authed(u.query, req)) return send(res, 401, JSON.stringify({ ok: false, error: 'unauthorized' }));
+    if (!config.allowControl) {
+      return send(res, 403, JSON.stringify({ ok: false, error: msg('srv.controlsOff', 'controls disabled in config') }));
+    }
+    return readJsonBody(req, res, function (body) {
+      var saved;
+      if (body && body.entities !== undefined) {
+        saved = haBarModule.saveConfig(body.entities, typeof body.showHints === 'boolean' ? { showHints: body.showHints } : null);
+      } else if (body && typeof body.showHints === 'boolean') {
+        saved = haBarModule.setOptions({ showHints: body.showHints });
+      } else {
+        saved = haBarModule.saveConfig(body && body.entities);
+      }
+      if (saved.ok && saved.entities && saved.entities.length && homeModule && homeModule.haBarInHomeBar() && haBarModule.sync) {
+        haBarModule.sync();
+      }
+      send(res, saved.ok ? 200 : 400, JSON.stringify(saved));
+    });
+  }
+
+  if (pathname === '/api/ha/bar/open' && req.method === 'POST' && haBarModule) {
+    if (!authed(u.query, req)) return send(res, 401, JSON.stringify({ ok: false, error: 'unauthorized' }));
+    if (!config.allowControl) {
+      return send(res, 403, JSON.stringify({ ok: false, error: msg('srv.controlsOff', 'controls disabled in config') }));
+    }
+    return haBarModule.open(function (r) {
+      send(res, r && r.ok ? 200 : 502, JSON.stringify(r || { ok: false, error: 'failed' }));
+    });
+  }
+
+  if (pathname === '/api/ha/bar/state' && req.method === 'GET' && haBarModule) {
+    if (!fromTV(req) && !authed(u.query, req)) return send(res, 401, JSON.stringify({ ok: false, error: 'unauthorized' }));
+    var barLocale = barAsks(u, res);
+    return haBarModule.state(function (r) {
+      if (r && barLocale !== null) r.text = haBarModule.barText(barLocale);
+      send(res, 200, JSON.stringify(r || { ok: false, error: 'failed' }));
+    });
+  }
+  // The bar's page asks this while out of sight, without Home Assistant being asked.
+  if (pathname === '/api/ha/bar/page' && req.method === 'GET' && haBarModule) {
+    if (!fromTV(req) && !authed(u.query, req)) return send(res, 401, JSON.stringify({ ok: false, error: 'unauthorized' }));
+    return send(res, 200, JSON.stringify({ ok: true, page: haBarModule.pageVersion() }));
+  }
+
+  // Glasshouse Home: a Home Assistant tile that steps is in focus, so Channel
+  // up and down set to Brightness go to Home (lib/remotekeys.js). The TV's own pages only.
+  if (pathname === '/api/home/ha-keys' && remoteKeysModule) {
+    if (!fromTV(req)) return send(res, 403, JSON.stringify({ ok: false, error: 'from the TV only' }));
+    // The tile last stepped by a channel key on webOS 11, which Home shows.
+    if (req.method === 'GET') return send(res, 200, JSON.stringify({ ok: true, last: remoteKeysModule.homeAdjustLast() }));
+    if (req.method !== 'POST') return send(res, 405, JSON.stringify({ ok: false }));
+    return readJsonBody(req, res, function (body) {
+      remoteKeysModule.setHomeAdjust(!!(body && body.on === true), function (r) { send(res, 200, JSON.stringify(r)); },
+        body && typeof body.id === 'string' ? body.id : '');
+    });
+  }
+  // A press the key filter launched a bar for, and a bar's page taking one (lib/barpress). The TV only.
+  if (pathname === '/api/bar/press' && req.method === 'POST' && barPressModule) {
+    if (!fromTV(req)) return send(res, 403, JSON.stringify({ ok: false, error: 'from the TV only' }));
+    return readJsonBody(req, res, function (body) {
+      var ok = barPressModule.pressed(body && body.app, body && body.press);
+      send(res, ok ? 200 : 400, JSON.stringify({ ok: ok }));
+    });
+  }
+  if (pathname === '/api/bar/seen' && req.method === 'GET' && barPressModule) {
+    if (!fromTV(req)) return send(res, 403, JSON.stringify({ ok: false, error: 'from the TV only' }));
+    barPressModule.seen(String(u.query.app || ''), Number(u.query.press));
+    return send(res, 200, JSON.stringify({ ok: true }));
+  }
+  if (pathname === '/api/bar/closed' && req.method === 'GET' && barPressModule) {
+    if (!fromTV(req)) return send(res, 403, JSON.stringify({ ok: false, error: 'from the TV only' }));
+    barPressModule.closed(String(u.query.app || ''), Number(u.query.press));
+    return send(res, 200, JSON.stringify({ ok: true }));
+  }
+  // The key filter's Brightness keys: a step made here, as the compositor's own call cannot read the level on webOS 4 (#1815). The TV only.
+  if (pathname === '/api/remotekeys/brightness' && req.method === 'POST' && remoteKeysModule) {
+    if (!fromTV(req)) return send(res, 403, JSON.stringify({ ok: false, error: 'from the TV only' }));
+    return readJsonBody(req, res, function (body) {
+      remoteKeysModule.brightnessFromFilter(body && body.delta, body && body.from, function (r) {
+        send(res, r && r.ok ? 200 : 502, JSON.stringify(r || { ok: false }));
+      });
+    });
+  }
+  // The key filter's Ambient light key: PicCap toggled here, as the dashboard does. The TV only.
+  if (pathname === '/api/remotekeys/piccap' && req.method === 'POST' && remoteKeysModule) {
+    if (!fromTV(req)) return send(res, 403, JSON.stringify({ ok: false, error: 'from the TV only' }));
+    return remoteKeysModule.piccapFromFilter(function (r) { send(res, 200, JSON.stringify(r)); });
+  }
+  if (pathname === '/api/ha/bar/act' && req.method === 'POST' && haBarModule) {
+    if (!fromTV(req) && !authed(u.query, req)) return send(res, 401, JSON.stringify({ ok: false, error: 'unauthorized' }));
+    if (!fromTV(req) && !config.allowControl) {
+      return send(res, 403, JSON.stringify({ ok: false, error: msg('srv.controlsOff', 'controls disabled in config') }));
+    }
+    barAsks(u, res);
+    return readJsonBody(req, res, function (body) {
+      haBarModule.act(body && body.id, body && body.action, body && body.value, body && body.prevState, function (r) {
+        send(res, r && r.ok ? 200 : 502, JSON.stringify(r || { ok: false, error: 'failed' }));
+      });
     });
   }
 
@@ -2278,6 +2646,13 @@ function handleRequest(req, res) {
     return tvApp('status', function (r) {
       if (r && r.ok) r.writable = config.allowControl;
       send(res, 200, JSON.stringify(r));
+    });
+  }
+
+  // Stored picture-calibration files (size and checksum only), where the TV has them.
+  if (pathname === '/api/lutslots') {
+    return lutSlots.readSlots(function (r) {
+      send(res, 200, JSON.stringify({ ok: true, available: !!r.available, slots: r.slots || [] }));
     });
   }
 
@@ -2743,6 +3118,13 @@ function handleRequest(req, res) {
   }
 
   // What the remote's keys do, on its own for the Home tab's Guide button choice.
+  // The LG remotes in use with this TV, for the Remote tab.
+  if (pathname === '/api/remotes' && req.method === 'GET') {
+    if (!remoteDetectModule) return send(res, 200, JSON.stringify({ ok: true, remotes: [], devices: [] }));
+    return remoteDetectModule.detect(function (r) {
+      send(res, 200, JSON.stringify({ ok: true, remotes: r.remotes, devices: r.devices }));
+    }, req.url.indexOf('fresh=1') !== -1);
+  }
   if (pathname === '/api/remotekeys' && req.method === 'GET') {
     if (!remoteKeysModule) return send(res, 200, JSON.stringify({ ok: true, supported: false }));
     return remoteKeysModule.getRemoteKeys(function (rk) { send(res, 200, JSON.stringify(rk || { ok: true, supported: false })); });
@@ -2765,6 +3147,11 @@ function handleRequest(req, res) {
       }
       if (body && body.brightnessBarStyle !== undefined) {
         return remoteKeysModule.setBrightnessBarStyle(body.brightnessBarStyle, function (r) {
+          send(res, r && r.ok ? 200 : 400, JSON.stringify(r));
+        });
+      }
+      if (body && body.remotes !== undefined) {
+        return remoteKeysModule.setRemoteSelection(body.remotes && body.remotes.mode, function (r) {
           send(res, r && r.ok ? 200 : 400, JSON.stringify(r));
         });
       }
@@ -3012,6 +3399,8 @@ function init(opts) {
   if (opts.appDns) appDnsModule = opts.appDns;
   if (opts.quickAccess) quickAccessModule = opts.quickAccess;
   if (opts.remoteKeys) remoteKeysModule = opts.remoteKeys;
+  if (opts.remoteDetect) remoteDetectModule = opts.remoteDetect;
+  if (opts.soundbar) soundbar = opts.soundbar;
   if (opts.homeScreen) homeScreenModule = opts.homeScreen;
   if (opts.home) homeModule = opts.home;
   if (opts.news) newsModule = opts.news;
@@ -3023,7 +3412,9 @@ function init(opts) {
   if (opts.screensavers) screensaversModule = opts.screensavers;
   if (opts.audioLevels) audioLevelsModule = opts.audioLevels;
   if (opts.haEntity) haEntityModule = opts.haEntity;
+  if (opts.haBar) haBarModule = opts.haBar;
   if (opts.inputBar) inputBarModule = opts.inputBar;
+  if (opts.inputBanner) inputBannerModule = opts.inputBanner;
   if (opts.ask) askModule = opts.ask;
   if (opts.updater) updaterModule = opts.updater;
   if (opts.logs) logsModule = opts.logs;
@@ -3033,12 +3424,15 @@ function init(opts) {
   if (opts.huesyncStatus) huesyncStatusFn = opts.huesyncStatus;
   if (opts.keyboardUp) keyboardUpFn = opts.keyboardUp;
   if (opts.repo) repoModule = opts.repo;
+  if (opts.catalog) catalogModule = opts.catalog;
   if (opts.installer) installerModule = opts.installer;
   if (opts.prometheus) prometheusModule = opts.prometheus;
   if (opts.syslog) syslogModule = opts.syslog;
   if (opts.ntp) ntpModule = opts.ntp;
   if (opts.history) historyModule = opts.history;
   if (opts.perfHistory) perfHistoryModule = opts.perfHistory;
+  if (opts.barPress) barPressModule = opts.barPress;
+  if (typeof opts.palmbus === 'function') palmbusInfoFn = opts.palmbus;
   if (opts.storageScan) storageScanModule = opts.storageScan;
   if (opts.sysinfo) sysinfoModule = opts.sysinfo;
   if (opts.screenColour) screenColourModule = opts.screenColour;
@@ -3050,6 +3444,7 @@ function init(opts) {
   if (opts.tileHidingOff) tileHidingOffMsg = opts.tileHidingOff;
   if (opts.assetPath) assetPathFn = opts.assetPath;
   if (opts.assetDirs) assetDirsList = opts.assetDirs;
+  if (opts.stateDir) uiCacheDir = opts.stateDir;
   if (opts.luna) lunaFn = opts.luna;
   if (opts.getMqttStatus) getMqttStatusFn = opts.getMqttStatus;
   if (opts.appsChanged) appsChangedFn = opts.appsChanged;

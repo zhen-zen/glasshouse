@@ -17,6 +17,9 @@ BUTTON_CODES = {
     399: 'green',
     400: 'yellow',
     401: 'blue',
+    # KEY_CHANNELUP, KEY_CHANNELDOWN in Linux's input-event-codes.h.
+    402: 'channelup',
+    403: 'channeldown',
     # Streaming buttons, IR_KEY_* in /usr/share/X11/xkb/keycodes/lg less 8.
     1037: 'netflix',
     1038: 'amazon',
@@ -63,10 +66,21 @@ def handle_sigterm(signum, frame):
 signal.signal(signal.SIGTERM, handle_sigterm)
 signal.signal(signal.SIGINT, handle_sigterm)
 
+SYS_INPUT = '/sys/class/input'
+
+
 def open_devices(devs):
+    # webOS makes /dev/input/event0 to event15 or more whether or not a device
+    # is behind each. Opening one with none makes the kernel run modprobe for
+    # its driver, and with a retry every five seconds that was more than one
+    # modprobe a second (eight empty nodes on a B8, six on a C2). sysfs lists
+    # only the devices there are; where it cannot be read, every node is tried.
+    sysfs = os.path.exists(SYS_INPUT)
     for i in range(16):
         path = '/dev/input/event%d' % i
         if path in devs.values() or not os.path.exists(path):
+            continue
+        if sysfs and not os.path.exists('%s/event%d' % (SYS_INPUT, i)):
             continue
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)

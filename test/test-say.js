@@ -83,4 +83,42 @@ var translated = JSON.parse(say.translateBody(JSON.stringify({ detail: detail })
 assert.strictEqual(translated.detail, 'Aceptado en Términos, Privacidad y Anuncios.');
 console.log('  ✓ a sentence built from a list is translated, joining word and all');
 
+// 7. A toast, with no page to translate it, in the TV's language
+var failed = msg('srv.update.failed', 'The update failed: {error}', { error: 'disk full' });
+assert.strictEqual(say.forLocale(failed, 'es_ES'), 'La actualización falló: disk full');
+assert.strictEqual(say.forLocale(failed, 'pt-BR'), failed, 'a region with its own file and no entry stays in English');
+assert.strictEqual(say.forLocale(failed, 'en_GB'), failed);
+assert.strictEqual(say.forLocale(failed, ''), failed);
+console.log('  ✓ a message for the TV follows the TV\'s language');
+
+// 8. A language file is read when it is first asked for, once, and not at start
+var dir2 = dir + '-lazy';
+if (!fs.existsSync(dir2)) fs.mkdirSync(dir2);
+fs.writeFileSync(path.join(dir2, 'it.json'), 'not read yet');
+fs.writeFileSync(path.join(dir2, 'sv.json'), '{ broken');
+var reads = [];
+var readFileSync = fs.readFileSync;
+fs.readFileSync = function (f) { reads.push(path.basename(String(f))); return readFileSync.apply(fs, arguments); };
+say.init(dir2);
+assert.deepStrictEqual ? assert.deepStrictEqual(reads, []) : assert.deepEqual(reads, []);
+// Written after the start: the start read nothing, so the first use sees this.
+fs.writeFileSync(path.join(dir2, 'it.json'), JSON.stringify({ 'srv.power.on': { text: 'Accesa', from: 'On' } }));
+say.define('srv.saver.lazy', 'Lazy clock', { it: 'Orologio pigro' });
+assert.strictEqual(say.forLocale(on, 'en_GB'), on);
+assert.strictEqual(reads.length, 0, 'English reads no file');
+assert.strictEqual(say.langOf({ headers: { 'x-glasshouse-lang': 'it' } }), 'it');
+assert.strictEqual(JSON.parse(say.translateBody(JSON.stringify({ label: on }), 'it')).label, 'Accesa');
+assert.strictEqual(JSON.parse(say.translateBody(JSON.stringify({ label: 'Lazy clock' }), 'it')).label, 'Orologio pigro',
+  'a translation given before the file was read is kept');
+assert.strictEqual(say.forLocale(on, 'it_IT'), 'Accesa');
+assert.strictEqual(reads.filter(function (f) { return f === 'it.json'; }).length, 1, 'read once');
+var errors = console.error;
+console.error = function () {};
+assert.strictEqual(say.langOf({ headers: { 'x-glasshouse-lang': 'sv' } }), null, 'a file that does not parse is no language');
+assert.strictEqual(say.translateBody(JSON.stringify({ label: on }), 'sv'), JSON.stringify({ label: on }));
+console.error = errors;
+assert.strictEqual(reads.filter(function (f) { return f === 'sv.json'; }).length, 1, 'tried once');
+fs.readFileSync = readFileSync;
+console.log('  ✓ each language file is read on first use, once');
+
 console.log('ALL test-say.js assertions passed!\n');

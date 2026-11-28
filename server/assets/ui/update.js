@@ -67,6 +67,16 @@ function renderUpdate(d) {
     disabled: !d.writable
   });
 
+  if (typeof d.askOnTv === 'boolean') {
+    updateToggle('upd-asktv', {
+      cls: d.askOnTv ? 'good' : 'idle',
+      label: d.askOnTv ? t('common.on', 'On') : t('common.off', 'Off'),
+      on: d.askOnTv,
+      // It asks about what the daily check finds.
+      disabled: !d.writable || !d.autoCheck
+    });
+  }
+
   // Answers from actions that predate the setting leave it as it was.
   if (typeof d.tvUpdatesBlocked === 'boolean') {
     updateToggle('upd-tvblock', {
@@ -172,6 +182,43 @@ function renderUpdate(d) {
         on: d.allowExperimentalScreensavers,
         disabled: !d.writable
       });
+    }
+  }
+
+  const pbRow = q('exp-palmbus-row');
+  if (pbRow) {
+    const pb = d.palmbus;
+    pbRow.hidden = !(pb && pb.available);
+    if (pb && pb.available) {
+      updateToggle('exp-palmbus', {
+        cls: pb.on ? 'good' : 'idle',
+        label: pb.on ? t('common.on', 'On') : t('common.off', 'Off'),
+        on: pb.on,
+        disabled: !d.writable
+      });
+      const parts = [];
+      // The reason, and what goes the usual way, are for a report (pb.report.details), not this line.
+      if (pb.off) parts.push(t('server.experimental.palmbus.off', 'It switched itself off after problems on this TV. Switch it on to try again.'));
+      else if (pb.setting === null) parts.push(pb.byDefault
+        ? t('server.experimental.palmbus.defaultOn', 'On by default for this TV\u2019s webOS version.')
+        : t('server.experimental.palmbus.defaultOff', 'Off by default for this TV\u2019s webOS version.'));
+      else parts.push(pb.setting
+        ? t('server.experimental.palmbus.switchedOn', 'Switched on.')
+        : t('server.experimental.palmbus.switchedOff', 'Switched off.'));
+      const note = q('exp-palmbus-note');
+      note.textContent = parts.join(' ');
+      if (pb.setting !== null && d.writable) {
+        const back = document.createElement('button');
+        back.type = 'button';
+        back.className = 'link-btn';
+        back.textContent = t('server.experimental.palmbus.useDefault', 'Use the default');
+        back.onclick = () => setExpPalmbus('default');
+        note.appendChild(document.createTextNode(' '));
+        note.appendChild(back);
+      }
+      q('exp-palmbus-compat').innerHTML = pb.standing === 'untried' && pb.report
+        ? homeCompatNote(t('server.experimental.palmbus.untried', 'Not yet reported working on webOS {version}. If anything stops working while it is on, switch it off, and let us know either way.', { version: pb.webos || '?' }), pb.report)
+        : '';
     }
   }
 
@@ -484,6 +531,13 @@ async function toggleAutoCheck() {
   const b = q('upd-auto');
   b.disabled = true;
   const r = await sendCommand('updateAutoCheck', !b.dataset.on);
+  if (r && r.ok) renderUpdate(r); else loadUpdate();
+}
+
+async function toggleAskOnTv() {
+  const b = q('upd-asktv');
+  b.disabled = true;
+  const r = await sendCommand('updateAskOnTv', !b.dataset.on);
   if (r && r.ok) renderUpdate(r); else loadUpdate();
 }
 
@@ -906,6 +960,15 @@ async function toggleExpScreensaver() {
   const r = await sendCommand('setWebos10ScreensaversAllowed', !b.dataset.on);
   if (r && r.ok) renderUpdate(r); else loadUpdate();
 }
+
+async function setExpPalmbus(value) {
+  const b = q('exp-palmbus');
+  b.disabled = true;
+  const r = await sendCommand('setLunaViaPalmbus', value);
+  if (r && r.ok) renderUpdate(r); else loadUpdate();
+}
+
+function toggleExpPalmbus() { setExpPalmbus(!q('exp-palmbus').dataset.on); }
 
 async function toggleExpPointer() {
   const b = q('exp-pointer');

@@ -53,12 +53,16 @@ function luna(uri, params, cb) {
     r.configs[rk.CONFIG_KEY] = tv.chain.slice();
   } else if (uri === 'com.webos.service.config/setConfigs') {
     if (tv.keysWriteFails && params.configs[rk.MAP_KEY]) return process.nextTick(function () { cb({ returnValue: false }); });
+    // tv.chainStops: the server stops as it writes the chain, so no answer comes.
+    if (tv.chainStops && params.configs[rk.CONFIG_KEY]) return;
     if (params.configs[rk.CONFIG_KEY]) { tv.chain = params.configs[rk.CONFIG_KEY].slice(); tv.chainWrites++; }
     if (params.configs[rk.MAP_KEY]) { tv.keys = JSON.parse(JSON.stringify(params.configs[rk.MAP_KEY])); tv.keysWrites++; }
   } else if (uri === 'com.webos.applicationManager/listApps') {
     r.apps = APPS;
   } else if (uri === 'com.webos.service.settings/getSystemSettings') {
     r.settings = { backlight: String(tv.backlight) };
+  } else if (uri === 'com.webos.service.settings/setSystemSettings' && params.settings && params.settings.backlight !== undefined) {
+    tv.backlight = Number(params.settings.backlight);
   } else if (uri === 'com.webos.applicationManager/getAppInfo') {
     // A CX has no quick input picker, so no input switcher choice.
     r.returnValue = false;
@@ -85,8 +89,8 @@ function loadFilter(broken, extra) {
   var ctx = {
     genericTimer: { set: function (ms, fn) { timers.push({ ms: ms, fn: fn }); return timers.length; } },
     WebOS: { Key_webOS_Netflix: 1001, Key_webOS_Amazon: 1002, Key_webOS_TVGuide: 1003, Key_webOS_Red: 1004,
-             Key_webOS_USP: 1005, Key_webOS_ChannelUp: 1006 },
-    Qt: { Key_Super_L: 2001 },
+             Key_webOS_USP: 1005, Key_webOS_ChannelUp: 1006, Key_webOS_Multikey: 1010, Key_webOS_ScreenRemote: 1011 },
+    Qt: { Key_Super_L: 2001, Key_Video: 2002 },
     KeyPolicy: { NextPolicy: 'next', Accepted: 'accepted', NotAccepted: 'notAccepted' },
     global: { getDeviceType: function (id) { return id === 2 ? 'MRCU' : id === 0 ? 'RCU' : ''; } },
     lunaCall: {
@@ -114,6 +118,14 @@ function loadFilter(broken, extra) {
             : tv.captureReply === undefined ? JSON.stringify({ returnValue: true }) : tv.captureReply;
           if (tv.capturePending) tv.capturePending.push(function () { cb(reply); });
           else cb(reply);
+        }
+        else if (service === 'org.webosbrew.piccap.service') {
+          var piccapAnswer = function () {
+            if (method === '/status') return cb && cb(JSON.stringify({ returnValue: true, isRunning: !!tv.piccapRunning }));
+            if (method === '/start' || method === '/stop') tv.piccapRunning = method === '/start';
+            if (cb) cb(JSON.stringify({ returnValue: true }));
+          };
+          if (tv.piccapHold && method === '/status') tv.piccapHold.push(piccapAnswer); else piccapAnswer();
         }
         else if (cb) cb(JSON.stringify({ returnValue: true }));
       }
@@ -431,6 +443,71 @@ step(function (next) {
   }));
 });
 
+// On webOS 4 the compositor's lunaCall.send cancels its request at once and
+// never calls back (#1815): the filter asks the server to step the brightness,
+// and uses its own calls only where the server does not answer.
+step(function (next) {
+  rk.setRemoteKey('red', 'open', 'action:brightnessUp', guard(function () {
+    var posts = [];
+    function ServerXhr() {}
+    ServerXhr.down = false;
+    ServerXhr.prototype.open = function (method, url) { this.method = method; this.url = url; };
+    ServerXhr.prototype.setRequestHeader = function () {};
+    ServerXhr.prototype.send = function (body) {
+      var x = this, b = JSON.parse(body);
+      posts.push({ url: x.url, body: b });
+      if (ServerXhr.down) { x.readyState = 4; x.status = 0; x.responseText = ''; return x.onreadystatechange(); }
+      rk.brightnessFromFilter(b.delta, b.from, function (r) {
+        x.readyState = 4;
+        x.status = r && r.ok ? 200 : 502;
+        x.responseText = JSON.stringify(r);
+        x.onreadystatechange();
+      });
+    };
+    var f = loadFilter(null, { XMLHttpRequest: ServerXhr });
+    var here = function () { return f.sent.filter(function (m) { return /^com\.webos\.service\.settings\//.test(m.uri); }).length; };
+    var tick = function () { var n = f.timers.length; f.expire(); f.timers.splice(0, n); };
+    f.timers.length = 0;
+    tv.backlight = 50;
+    f.handle(1004, true, false);
+    setTimeout(guard(function () {
+      assert.strictEqual(tv.backlight, 60, 'stepped by the server');
+      assert.ok(/:\d+\/api\/remotekeys\/brightness$/.test(posts[0].url));
+      assert.deepEqual(posts[0].body, { delta: 10, from: null }, 'the press asks it to read the level');
+      assert.strictEqual(here(), 0, 'the compositor made no settings call of its own');
+      tick();
+      setTimeout(guard(function () {
+        assert.strictEqual(tv.backlight, 70, 'a held key steps again');
+        assert.strictEqual(posts[1].body.from, 60, 'from the level the server gave');
+        f.handle(1004, false, false);
+        tv.backlight = 95;
+        f.handle(1004, true, false);
+        setTimeout(guard(function () {
+          assert.strictEqual(tv.backlight, 100);
+          var asked = posts.length;
+          tick();
+          setTimeout(guard(function () {
+            assert.strictEqual(posts.length, asked, 'at the top, the held key stops');
+            f.handle(1004, false, false);
+            // The server not answering: the compositor's own calls, as before.
+            ServerXhr.down = true;
+            f.timers.length = 0;
+            tv.backlight = 50;
+            f.handle(1004, true, false);
+            f.handle(1004, false, false);
+            assert.strictEqual(tv.backlight, 60, 'stepped by the compositor itself');
+            assert.ok(here() > 0);
+            rk.setRemoteKey('red', 'lg', '', guard(function () {
+              console.log('  ✓ Brightness keys are stepped by the server, the filter\'s own calls only where it does not answer (#1815)');
+              next();
+            }));
+          }), 30);
+        }), 30);
+      }), 30);
+    }), 30);
+  }));
+});
+
 step(function (next) {
   rk.setRemoteKey('red', 'open', 'action:brightnessUp', guard(function () {
     rk.getRemoteKeys(guard(function (before) {
@@ -727,8 +804,25 @@ step(function (next) {
         assert.strictEqual(tv.chainWrites, writes + 3);
         assert.strictEqual(fs.readFileSync(FILTER, 'utf8'), source);
         assert.deepEqual(tv.chain[0], { file: FILTER, handler: rk.HANDLER });
-        console.log('  ✓ ensure() at start leaves an intact chain alone, puts a lost entry back, and reloads an outdated filter');
-        next();
+        // An update the server stopped in the middle of: the old file stays
+        // until the filter is out of the chain, so the next start still sees
+        // it outdated and reloads it.
+        fs.writeFileSync(FILTER, '/* an older filter */', 'utf8');
+        tv.chainStops = true;
+        rk.ensure(function () { throw new Error('the chain write never answered'); });
+        setTimeout(function () {
+          assert.strictEqual(fs.readFileSync(FILTER, 'utf8'), '/* an older filter */');
+          tv.chainStops = false;
+          var before = tv.chainWrites;
+          rk.ensure(guard(function (ok4) {
+            assert.strictEqual(ok4, true);
+            assert.strictEqual(tv.chainWrites, before + 2);
+            assert.strictEqual(fs.readFileSync(FILTER, 'utf8'), source);
+            assert.deepEqual(tv.chain[0], { file: FILTER, handler: rk.HANDLER });
+            console.log('  ✓ ensure() at start leaves an intact chain alone, puts a lost entry back, and reloads an outdated filter, even after a start that stopped part way');
+            next();
+          }));
+        }, 50);
       }));
     }));
   }));
@@ -786,7 +880,7 @@ step(function (next) {
     assert.deepEqual(saved, { amazon: 'com.webos.app.home', red: 'netflix' });
     rk.getRemoteKeys(guard(function (r) {
       var amazon = r.keys.filter(function (k) { return k.key === 'amazon'; })[0];
-      assert.strictEqual(amazon.opens, 'Home');
+      assert.strictEqual(amazon.opens, "LG's Home");
       rk.setRemoteKey('amazon', 'lg', '', guard(function () {
         rk.setRemoteKey('red', 'lg', '', guard(function () {
           console.log('  ✓ a key set to the Glasshouse Home app of earlier builds is set to Home at start');
@@ -889,6 +983,96 @@ step(function (next) {
           }));
         }));
       }));
+    }));
+  }));
+});
+
+step(function (next) {
+  // The ? and 123 buttons are filter keys where LG's filters name them, and there they can do nothing.
+  var offered = function (r, name) { return r.keys.filter(function (k) { return k.key === name; })[0]; };
+  rk.getRemoteKeys(guard(function (without) {
+    assert.ok(!offered(without, 'multikey') && !offered(without, 'screenremote'), 'not where no filter names them');
+    fs.writeFileSync(path.join(filtersDir, 'more.js'), 'case WebOS.Key_webOS_Multikey: case WebOS.Key_webOS_ScreenRemote:');
+    rk.init({ luna: luna, stateDir: stateDir, filtersDir: filtersDir });
+    rk.getRemoteKeys(guard(function (withKeys) {
+      assert.ok(offered(withKeys, 'multikey'), 'the ? button where a filter names it');
+      assert.ok(!offered(withKeys, 'multikey').noNothing, 'the filter can leave it doing nothing');
+      assert.strictEqual(offered(withKeys, 'screenremote').title, '123 button');
+      rk.setRemoteKey('multikey', 'nothing', '', guard(function (s) {
+        assert.strictEqual(s.ok, true, s.error);
+        var f = loadFilter();
+        assert.strictEqual(f.handle(1010, true, false), 'accepted', 'a press is taken from LG');
+        assert.strictEqual(f.handle(1010, false, false), 'accepted', 'and its release, so no hold starts');
+        rk.setRemoteKey('screenremote', 'open', 'netflix', guard(function (s2) {
+          assert.strictEqual(s2.ok, true, s2.error);
+          var f2 = loadFilter();
+          assert.strictEqual(f2.handle(1011, true, false), 'accepted', 'a press is taken, so LG shows no on-screen remote');
+          assert.strictEqual(f2.handle(1011, false, false), 'accepted');
+          rk.setRemoteKey('multikey', 'lg', '', guard(function () {
+            rk.setRemoteKey('screenremote', 'lg', '', guard(function () {
+              var f3 = loadFilter();
+              assert.strictEqual(f3.handle(1010, true, false), 'next', 'As LG has it passes ? on');
+              assert.strictEqual(f3.handle(1011, true, false), 'next', 'and 123');
+              fs.unlinkSync(path.join(filtersDir, 'more.js'));
+              rk.init({ luna: luna, stateDir: stateDir, filtersDir: filtersDir });
+              console.log('  \u2713 the ? and 123 buttons are offered where the filters name them, can do nothing there, and As LG has it passes them on');
+              next();
+            }));
+          }));
+        }));
+      }));
+    }));
+  }));
+});
+
+step(function (next) {
+  // Home Hub is Qt.Key_Video in the filters: offered only where the TV's key table gives that plain Qt key to it.
+  fs.writeFileSync(path.join(filtersDir, 'homehub.js'), 'case Qt.Key_Video:');
+  var hubTable = path.join(__dirname, 'fixtures', 'lg-keytable-oled48c56lb-webos10.txt');
+  var otherTable = path.join(stateDir, 'keycodes-other');
+  var hasHub = function (r) { return r.keys.some(function (k) { return k.key === 'homehub'; }); };
+  fs.writeFileSync(otherTable, '    <IR_KEY_SOMETHING_ELSE> = 1031; // Qt::Key_Video=0x010000f3\n');
+  rk.init({ luna: luna, stateDir: stateDir, filtersDir: filtersDir, keyTablePath: otherTable });
+  rk.getRemoteKeys(guard(function (withOther) {
+    assert.ok(!hasHub(withOther), 'not where Key_Video is another button');
+    rk.init({ luna: luna, stateDir: stateDir, filtersDir: filtersDir, keyTablePath: path.join(stateDir, 'no-such-table') });
+    rk.getRemoteKeys(guard(function (withNone) {
+      assert.ok(!hasHub(withNone), 'nor where there is no key table');
+      fs.unlinkSync(otherTable);
+      rk.init({ luna: luna, stateDir: stateDir, filtersDir: filtersDir, keyTablePath: hubTable });
+      rk.getRemoteKeys(guard(function (withHub) {
+        assert.ok(withHub.keys.some(function (k) { return k.key === 'homehub' && k.title === 'Home Hub'; }), 'offered where the key table gives it Key_Video');
+        rk.setRemoteKey('homehub', 'open', 'netflix', guard(function (s) {
+          assert.strictEqual(s.ok, true, s.error);
+          assert.strictEqual(loadFilter().handle(2002, true, false), 'accepted', 'a press is taken from LG');
+          rk.setRemoteKey('homehub', 'lg', '', guard(function () {
+            assert.strictEqual(loadFilter().handle(2002, true, false), 'next');
+            fs.unlinkSync(path.join(filtersDir, 'homehub.js'));
+            rk.init({ luna: luna, stateDir: stateDir, filtersDir: filtersDir });
+            console.log('  \u2713 Home Hub is offered only where the key table gives Qt.Key_Video to it');
+            next();
+          }));
+        }));
+      }));
+    }));
+  }));
+});
+
+step(function (next) {
+  // With the MR25GA selected, the microphone key goes by the name printed on it: AI.
+  fs.writeFileSync(path.join(filtersDir, 'voice.js'), 'case WebOS.Key_webOS_Voice:');
+  var mr25 = require('../server/lib/remotes').find('MR25GA');
+  rk.init({ luna: luna, stateDir: stateDir, filtersDir: filtersDir,
+    detectRemotes: function (cb) { cb({ auto: [mr25], detected: [] }); } });
+  rk.getRemoteKeys(guard(function (r) {
+    var mic = r.keys.filter(function (k) { return k.key === 'voice'; })[0];
+    assert.strictEqual(mic.title, 'AI', 'the name on the remote');
+    rk.init({ luna: luna, stateDir: stateDir, filtersDir: filtersDir });
+    rk.getRemoteKeys(guard(function (plain) {
+      assert.strictEqual(plain.keys.filter(function (k) { return k.key === 'voice'; })[0].title, 'Microphone', 'no remote known: its own name');
+      fs.unlinkSync(path.join(filtersDir, 'voice.js'));
+      console.log('  \u2713 the microphone key is named AI while the MR25GA is the remote in use');
+      next();
     }));
   }));
 });
@@ -1144,11 +1328,17 @@ step(function (next) {
 });
 
 step(function (next) {
+  var told = [];
+  function TellXhr() {}
+  TellXhr.prototype.open = function (method, url) { this.method = method; this.url = url; };
+  TellXhr.prototype.setRequestHeader = function () {};
+  TellXhr.prototype.send = function (body) { told.push({ method: this.method, url: this.url, body: JSON.parse(body) }); };
   var f = loadFilter(null, {
     WebOS: { Key_webOS_Netflix: 1001, Key_webOS_Amazon: 1002, Key_webOS_TVGuide: 1003, Key_webOS_Red: 1004,
              Key_webOS_USP: 1005, Key_webOS_InputSource: 1006 },
     Qt: { Key_Super_L: 2001, Key_Right: 3001 },
-    global: { isForegroundApp: function () { return false; }, sendKeyToFocusWindow: function () {} }
+    global: { isForegroundApp: function () { return false; }, sendKeyToFocusWindow: function () {} },
+    XMLHttpRequest: TellXhr
   });
   f.handle(1006, true, false);
   f.handle(1006, false, false);
@@ -1158,6 +1348,10 @@ step(function (next) {
   assert.strictEqual(p1.glasshouse, 'bar');
   assert.ok(p2.press > p1.press, 'each press numbered, as the Home key opens it, so a second press closes it');
   console.log('  ✓ the key opens Glasshouse Bar as the Home key does, a number for each press');
+  assert.deepEqual(told.map(function (t) { return [t.method, t.url.replace(/:\d+\//, ':PORT/'), t.body.app, t.body.press]; }),
+    [['POST', 'http://127.0.0.1:PORT/api/bar/press', 'com.tvweb.homebar', p1.press],
+     ['POST', 'http://127.0.0.1:PORT/api/bar/press', 'com.tvweb.homebar', p2.press]]);
+  console.log('  ✓ the server is told each press, with its number, to send again one the bar never had');
   next();
 });
 
@@ -1346,6 +1540,338 @@ step(function (next) {
                     next();
                   }));
                 }));
+              }));
+            }));
+          }));
+        }));
+      }));
+    }));
+  }));
+});
+
+// The keys of the remotes in use: those on none of them are marked, only where all are known
+step(function (next) {
+  var known = { id: 'A', title: 'Remote A', complete: true, image: 'generic.png', keys: { netflix: 'measured', amazon: 'measured' } };
+  var selected = [known];
+  rk.init({ luna: luna, inputNames: { hdmi1: 'HDMI 1', hdmi2: 'Apple TV' }, stateDir: stateDir, filtersDir: filtersDir,
+    detectRemotes: function (cb) { process.nextTick(function () { cb({ auto: selected, detected: [] }); }); } });
+  rk.getRemoteKeys(guard(function (r) {
+    var off = r.keys.filter(function (k) { return k.offRemote; }).map(function (k) { return k.key; });
+    assert.ok(off.length > 0 && off.indexOf('netflix') === -1 && off.indexOf('amazon') === -1, 'keys the remote lacks are marked, its own are not');
+    assert.ok(off.indexOf('red') !== -1);
+    assert.strictEqual(r.remotes.canFold, true);
+    assert.strictEqual(r.remotes.folding, true);
+    assert.deepEqual(r.remotes.selected, [{ id: 'A', title: 'Remote A', image: 'generic.png', numberKeys: null }], 'not known: null');
+    assert.strictEqual(r.remotes.unknown, 0);
+    assert.strictEqual(r.remotes.why, '', 'nothing to explain while it folds');
+    rk.setRemoteKey('red', 'open', 'netflix', guard(function (s) {
+      assert.ok(s.ok, s.error);
+      rk.getRemoteKeys(guard(function (changed) {
+        var red = changed.keys.filter(function (k) { return k.key === 'red'; })[0];
+        assert.strictEqual(red.action, 'open');
+        assert.strictEqual(red.offRemote, true, 'marked all the same: the page keeps a changed key in sight');
+        selected = [known, null];
+        rk.getRemoteKeys(guard(function (withUnknown) {
+          assert.ok(!withUnknown.keys.some(function (k) { return k.offRemote; }), 'an unknown remote in use folds nothing');
+          assert.strictEqual(withUnknown.remotes.canFold, false);
+          assert.strictEqual(withUnknown.remotes.folding, false);
+          assert.strictEqual(withUnknown.remotes.unknown, 1);
+          assert.strictEqual(withUnknown.remotes.why, 'unknown', 'says why: a remote not in the catalogue');
+          selected = [{ id: 'U', title: 'Unfinished', complete: false, keys: { netflix: 'measured' } }];
+          rk.getRemoteKeys(guard(function (unfinished) {
+            assert.ok(!unfinished.keys.some(function (k) { return k.offRemote; }), 'nor does an unfinished list');
+            assert.strictEqual(unfinished.remotes.canFold, false);
+            assert.strictEqual(unfinished.remotes.why, 'unfinished', 'says why: a list not finished');
+            selected = [];
+            rk.getRemoteKeys(guard(function (none) {
+              assert.ok(!none.keys.some(function (k) { return k.offRemote; }), 'nor does no remote');
+              assert.strictEqual(none.remotes.canFold, false);
+              assert.strictEqual(none.remotes.why, 'none', 'says why: no remote known');
+              rk.init({ luna: luna, inputNames: {}, stateDir: stateDir, filtersDir: filtersDir, detectRemotes: function () { throw new Error('lookup failed'); } });
+              rk.getRemoteKeys(guard(function (failed) {
+                assert.ok(failed.ok && !failed.keys.some(function (k) { return k.offRemote; }), 'a lookup that fails folds nothing');
+                rk.setRemoteKey('red', 'lg', '', guard(function () {
+                  console.log('  ✓ keys on none of the remotes in use are marked where every remote is known, and never otherwise');
+                  next();
+                }));
+              }));
+            }));
+          }));
+        }));
+      }));
+    }));
+  }));
+});
+
+// Which remotes the tab is for: automatic (folds to what is in use) or all buttons.
+step(function (next) {
+  var detected = [{ name: 'LGE MR25GA', id: 'MR25GA', title: 'Magic Remote MR25GA', image: 'generic.png', current: true }];
+  rk.init({ luna: luna, inputNames: {}, stateDir: stateDir, filtersDir: filtersDir,
+    detectRemotes: function (cb) { cb({ auto: [{ id: 'A', title: 'Remote A', complete: true, keys: { netflix: 'measured' } }], detected: detected }); } });
+  var file = path.join(stateDir, 'remotekeys.json');
+  rk.getRemoteKeys(guard(function (r) {
+    assert.strictEqual(r.remotes.mode, 'auto');
+    assert.strictEqual(r.remotes.canFold, true);
+    assert.strictEqual(r.remotes.folding, true, 'automatic follows what is in use');
+    assert.deepEqual(r.remotes.detected, detected, 'what was detected, for the page to say');
+    rk.setRemoteSelection('all', guard(function (a) {
+      assert.ok(a.ok, a.error);
+      assert.ok(fs.existsSync(file), 'kept with the keys');
+      rk.getRemoteKeys(guard(function (all) {
+        assert.strictEqual(all.remotes.mode, 'all');
+        assert.strictEqual(all.remotes.canFold, true, 'the switch stays offered while folding is turned off');
+        assert.strictEqual(all.remotes.folding, false, 'all buttons folds nothing');
+        assert.ok(all.keys.some(function (k) { return k.offRemote; }), 'keys off the remote in use stay marked, so the page can still set them apart');
+        assert.ok(!all.keys.filter(function (k) { return k.offRemote; }).some(function (k) { return k.key === 'netflix'; }), 'its own key is not marked');
+        // Refused: no such mode
+        rk.setRemoteSelection('some', guard(function (mode) {
+          assert.strictEqual(mode.ok, false);
+          // The choice survives changes to the keys
+          rk.setRemoteKey('red', 'open', 'netflix', guard(function () {
+            rk.setRemoteKey('red', 'lg', '', guard(function () {
+              assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).remotes.mode, 'all', 'kept with every key as LG has it');
+              rk.setRemoteSelection('auto', guard(function (back) {
+                assert.ok(back.ok, back.error);
+                assert.ok(!fs.existsSync(file), 'automatic is nothing kept, so no file where no key is set');
+                console.log('  ✓ the remotes the tab is for are automatic or all buttons, kept with the keys and checked');
+                next();
+              }));
+            }));
+          }));
+        }));
+      }));
+    }));
+  }));
+});
+
+// Ambient light toggle: offered where PicCap is installed, flips /start or
+// /stop in the filter without repeats, and drops out cleanly if PicCap goes.
+step(function (next) {
+  var piccapHere = true;
+  tv.piccapRunning = false;
+  tv.piccapHold = null;
+  rk.init({
+    luna: luna, inputNames: { hdmi1: 'HDMI 1', hdmi2: 'Apple TV' }, stateDir: stateDir, filtersDir: filtersDir,
+    piccap: function () { return piccapHere; }
+  });
+  rk.availabilityChanged();
+  rk.getRemoteKeys(guard(function (r) {
+    assert.ok(r.choices.some(function (c) { return c.id === 'action:piccap' && c.kind === 'action' && c.title === 'Ambient light'; }),
+      'Ambient light offered when PicCap is installed');
+    rk.setRemoteKey('red', 'open', 'action:piccap', guard(function (s) {
+      assert.ok(s.ok, s.error);
+      assert.strictEqual(tv.keys.keys.red, 'action:piccap');
+      var f = loadFilter();
+      // Release and repeat do nothing; a press starts PicCap when stopped.
+      assert.strictEqual(f.handle(1004, false, false), 'accepted');
+      assert.strictEqual(f.handle(1004, true, true), 'accepted');
+      assert.strictEqual(f.sent.length, 0, 'release and repeat ignored');
+      assert.strictEqual(f.handle(1004, true, false), 'accepted');
+      assert.strictEqual(tv.piccapRunning, true, 'started PicCap');
+      // Next press stops PicCap when running.
+      assert.strictEqual(f.handle(1004, true, false), 'accepted');
+      assert.strictEqual(tv.piccapRunning, false, 'stopped PicCap');
+      // Overlapping press while /status is in flight is ignored until it settles.
+      tv.piccapHold = [];
+      assert.strictEqual(f.handle(1004, true, false), 'accepted');
+      assert.strictEqual(f.handle(1004, true, false), 'accepted');
+      assert.strictEqual(tv.piccapHold.length, 1, 'busy guard drops overlapping press');
+      tv.piccapHold.shift()();
+      tv.piccapHold = null;
+      assert.strictEqual(tv.piccapRunning, true, 'completed held toggle');
+      // With the server answering, it toggles PicCap and the filter asks PicCap nothing (#1757).
+      var posted = [], answer = 200;
+      function FakeXhr() { this.readyState = 0; this.status = 0; }
+      FakeXhr.prototype.open = function (method, url) { this.method = method; this.url = url; };
+      FakeXhr.prototype.setRequestHeader = function (k, v) { this.type = v; };
+      FakeXhr.prototype.send = function () {
+        posted.push(this.method + ' ' + this.url + ' ' + this.type);
+        this.readyState = 4; this.status = answer; this.onreadystatechange();
+      };
+      var fx = loadFilter(null, { XMLHttpRequest: FakeXhr });
+      var before = tv.piccapRunning;
+      assert.strictEqual(fx.handle(1004, true, false), 'accepted');
+      assert.deepEqual(posted, ['POST http://127.0.0.1:8080/api/remotekeys/piccap application/json']);
+      assert.strictEqual(tv.piccapRunning, before, 'PicCap left to the server');
+      assert.ok(!fx.sent.some(function (x) { return /piccap/.test(x.uri); }), 'no call to PicCap from the compositor');
+      // The server not answering: PicCap is asked from the filter, as before.
+      answer = 0;
+      var fy = loadFilter(null, { XMLHttpRequest: FakeXhr });
+      assert.strictEqual(fy.handle(1004, true, false), 'accepted');
+      assert.strictEqual(tv.piccapRunning, !before, 'toggled from the filter without the server');
+      tv.piccapRunning = before;
+      // Removing PicCap stops putting the key in configd while keeping the saved label.
+      piccapHere = false;
+      rk.availabilityChanged();
+      setTimeout(guard(function () {
+        assert.strictEqual(tv.keys.keys.red, undefined, 'omitted from active filter while PicCap is absent');
+        rk.getRemoteKeys(guard(function (gone) {
+          assert.ok(!gone.choices.some(function (c) { return c.id === 'action:piccap'; }), 'not offered when PicCap is absent');
+          var red = gone.keys.filter(function (k) { return k.key === 'red'; })[0];
+          assert.strictEqual(red.opens, 'Ambient light', 'keeps friendly title while missing');
+          rk.setRemoteKey('red', 'lg', '', guard(function () {
+            console.log('  ✓ Ambient light toggle toggles PicCap in the filter without repeats and hides when absent');
+            // The server's side: the toggle it is given, its answer passed back.
+            var toggles = 0;
+            rk.init({ luna: luna, inputNames: { hdmi1: 'HDMI 1', hdmi2: 'Apple TV' }, stateDir: stateDir, filtersDir: filtersDir,
+              togglePiccap: function (cb) { toggles++; cb({ ok: true, isRunning: true }); } });
+            rk.piccapFromFilter(guard(function (r) {
+              assert.deepEqual([toggles, r.ok], [1, true]);
+              rk.init({ luna: luna, inputNames: { hdmi1: 'HDMI 1', hdmi2: 'Apple TV' }, stateDir: stateDir, filtersDir: filtersDir });
+              rk.piccapFromFilter(guard(function (r2) {
+                assert.strictEqual(r2.ok, false, 'no PicCap, no toggle');
+                console.log('  ✓ the filter asks the server to toggle PicCap, and asks PicCap itself only where the server does not answer');
+                next();
+              }));
+            }));
+          }));
+        }));
+      }), 20);
+    }));
+  }));
+});
+
+// A B8's MR18 (webOS 4.4.3): Text, T.Opt, Live Zoom, AD and the 123 button are
+// offered from the WebOS module, and the number keys where LG's filters handle
+// them; one that is set is taken and opens what it is set to.
+step(function (next) {
+  var plugin = path.join(stateDir, 'libwebosglobalplugin.so');
+  var KEYS_SRC = ['Teletext', 'TextOption', 'LiveZoom', 'AudioDescription', 'ScreenRemote'];
+  fs.writeFileSync(plugin, 'x\u0000' + KEYS_SRC.map(function (n) { return 'Key_webOS_' + n; }).join('\u0000') + '\u0000');
+  var numbers = path.join(filtersDir, 'numbers.js');
+  rk.init({ luna: luna, stateDir: stateDir, filtersDir: filtersDir, webosPlugin: plugin });
+  rk.getRemoteKeys(guard(function (r) {
+    var keys = r.keys.map(function (k) { return k.key; });
+    ['teletext', 'textoption', 'livezoom', 'ad', 'screenremote'].forEach(function (k) { assert.ok(keys.indexOf(k) !== -1, k + ' offered from the module'); });
+    assert.ok(keys.indexOf('num1') === -1, 'no number keys where LG\'s filters do not handle them');
+    fs.writeFileSync(numbers, 'if (key >= Qt.Key_1 && key <= Qt.Key_9 || key === Qt.Key_0) {}');
+    rk.init({ luna: luna, stateDir: stateDir, filtersDir: filtersDir, webosPlugin: plugin });
+    rk.getRemoteKeys(guard(function (r2) {
+      var nums = r2.keys.filter(function (k) { return /^num/.test(k.key); });
+      assert.deepEqual(nums.map(function (k) { return k.title; }), ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0']);
+      assert.ok(nums.every(function (k) { return k.numberKey === true; }), 'each says it takes the digit and Quick Access');
+      rk.setRemoteKey('teletext', 'open', 'netflix', guard(function (a) {
+        assert.ok(a.ok, a.error);
+        rk.setRemoteKey('num5', 'open', 'youtube.leanback.v4', guard(function (b) {
+          assert.ok(b.ok, b.error);
+          var f = loadFilter(null, {
+            WebOS: { Key_webOS_Teletext: 1201, Key_webOS_TextOption: 1202 },
+            Qt: { Key_Super_L: 2001, Key_Video: 2002, Key_5: 53, Key_6: 54 }
+          });
+          assert.strictEqual(f.handle(1201, true, false), 'accepted');
+          assert.strictEqual(f.handle(53, true, false), 'accepted');
+          assert.deepEqual(f.launched.map(function (l) { return l.id; }), ['netflix', 'youtube.leanback.v4']);
+          assert.strictEqual(f.handle(1202, true, false), 'next', 'T.Opt left to LG while it is not set');
+          assert.strictEqual(f.handle(54, true, false), 'next', 'and the number keys not set');
+          rk.setRemoteKey('teletext', 'lg', '', guard(function () {
+            rk.setRemoteKey('num5', 'lg', '', guard(function () {
+              fs.unlinkSync(plugin);
+              fs.unlinkSync(numbers);
+              rk.init({ luna: luna, inputNames: { hdmi1: 'HDMI 1', hdmi2: 'Apple TV' }, stateDir: stateDir, filtersDir: filtersDir });
+              console.log('  ✓ Text, T.Opt, Live Zoom, AD, the 123 button and the number keys are offered and taken where the TV can');
+              next();
+            }));
+          }));
+        }));
+      }));
+    }));
+  }));
+});
+
+// Home is named by what it opens: LG's Home, or Glasshouse Home where it runs under LG's Home's id.
+step(function (next) {
+  rk.getRemoteKeys(guard(function (r) {
+    var home = r.choices.filter(function (c) { return c.id === 'com.webos.app.home'; })[0];
+    assert.deepEqual([home.title, home.icon], ["LG's Home", 'lgHome']);
+    rk.init({ luna: luna, inputNames: { hdmi1: 'HDMI 1', hdmi2: 'Apple TV' }, stateDir: stateDir, filtersDir: filtersDir, homeIsGlasshouse: function () { return true; } });
+    rk.getRemoteKeys(guard(function (r2) {
+      var gh = r2.choices.filter(function (c) { return c.id === 'com.webos.app.home'; })[0];
+      assert.deepEqual([gh.title, gh.icon], ['Glasshouse Home', 'glasshouse']);
+      rk.init({ luna: luna, inputNames: { hdmi1: 'HDMI 1', hdmi2: 'Apple TV' }, stateDir: stateDir, filtersDir: filtersDir });
+      console.log('  ✓ the Home choice says whether it opens LG\'s Home or Glasshouse Home');
+      next();
+    }));
+  }));
+});
+
+// Glasshouse Home with a Home Assistant tile that steps in focus: Channel up
+// and down set to Brightness go to Home while it is in front, and set the
+// brightness anywhere else.
+step(function (next) {
+  fs.writeFileSync(FILTER, rk.filterSource(), 'utf8');
+  var front = true;
+  var f = loadFilter(null, { global: { isForegroundApp: function (id) { return front && id === 'com.webos.app.home'; } } });
+  var UP = 1006;
+  f.tell({ keys: { channelup: 'action:brightnessUp' } });
+  assert.strictEqual(f.handle(UP, true, false), 'accepted', 'brightness without the flag');
+  f.tell({ keys: { channelup: 'action:brightnessUp' }, homeAdjust: true });
+  assert.strictEqual(f.handle(UP, true, false), 'next', 'to Home while its tile is in focus');
+  assert.strictEqual(f.handle(UP, false, false), 'next', 'the release too');
+  front = false;
+  assert.strictEqual(f.handle(UP, true, false), 'accepted', 'brightness once Home is not in front');
+  front = true;
+  f.tell({ keys: { red: 'action:brightnessUp' }, homeAdjust: true });
+  assert.strictEqual(f.handle(1004, true, false), 'accepted', 'only the channel keys are handed to Home');
+
+  // The server's side: written only with a channel key set to Brightness, and only on a change.
+  fs.writeFileSync(MAP, JSON.stringify({ keys: { red: 'action:brightnessUp' } }), 'utf8');
+  var before = tv.keysWrites;
+  rk.setHomeAdjust(true, guard(function (r) {
+    assert.strictEqual(r.changed, false, 'no channel key set to Brightness');
+    assert.strictEqual(tv.keysWrites, before);
+    fs.writeFileSync(MAP, JSON.stringify({ keys: { channelup: 'action:brightnessUp', channeldown: 'action:brightnessDown' } }), 'utf8');
+    rk.setHomeAdjust(true, guard(function (r2) {
+      assert.ok(r2.ok && r2.changed);
+      assert.strictEqual(tv.keys.homeAdjust, true);
+      assert.strictEqual(tv.keys.keys.channelup, 'action:brightnessUp', 'the keys written with it');
+      var writes = tv.keysWrites;
+      rk.setHomeAdjust(true, guard(function (r3) {
+        assert.strictEqual(r3.changed, false);
+        assert.strictEqual(tv.keysWrites, writes, 'not written again');
+        rk.setHomeAdjust(false, guard(function (r4) {
+          assert.ok(r4.ok && r4.changed);
+          assert.strictEqual(tv.keys.homeAdjust, undefined);
+          console.log('  ✓ Channel up and down set to Brightness step a Home Assistant tile in focus on Glasshouse Home');
+          next();
+        }));
+      }));
+    }));
+  }));
+});
+
+step(function (next) {
+  var ha = { calls: [], kept: true };
+  rk.init({ luna: function (uri, payload, cb) {
+    if (uri === 'com.webos.applicationManager/listApps') {
+      return luna(uri, payload, function (r) {
+        r.apps = r.apps.concat([{ id: 'com.tvweb.habar', title: 'Home Assistant Bar' }]);
+        cb(r);
+      });
+    }
+    luna(uri, payload, cb);
+  }, inputNames: { hdmi1: 'HDMI 1', hdmi2: 'Apple TV' }, stateDir: stateDir, filtersDir: filtersDir,
+    haBarAllowed: function () { return true; },
+    haBarKept: function () { return ha.kept; },
+    haBarApp: function (action, cb) {
+      ha.calls.push(action);
+      process.nextTick(function () { cb({ ok: true }); });
+    } });
+  rk.getRemoteKeys(guard(function (r) {
+    assert.strictEqual(r.choices.filter(function (c) { return c.id === 'com.tvweb.habar'; }).length, 1,
+      'Home Assistant bar offered once even when listed by listApps');
+    rk.setRemoteKey('red', 'open', 'com.tvweb.habar', guard(function (s) {
+      assert.ok(s.ok, s.error);
+      rk.setRemoteKey('red', 'lg', '', guard(function (s2) {
+        assert.ok(s2.ok, s2.error);
+        setImmediate(guard(function () {
+          assert.deepEqual(ha.calls, ['install'], 'kept when another trigger (Quick Access / Bar) uses Home Assistant bar');
+          ha.kept = false;
+          rk.setRemoteKey('red', 'open', 'com.tvweb.habar', guard(function () {
+            rk.setRemoteKey('red', 'lg', '', guard(function () {
+              setImmediate(guard(function () {
+                assert.deepEqual(ha.calls, ['install', 'install', 'remove'], 'removed once nothing else uses Home Assistant bar');
+                console.log('  ✓ Home Assistant bar is offered once in Remote keys and kept until nothing else uses it');
+                next();
               }));
             }));
           }));

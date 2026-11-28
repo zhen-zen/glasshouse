@@ -363,6 +363,27 @@ async function visitInputBarBehindHome(browser, base, problems) {
       if (!behindHome) {
         await page.goto(base + '/assets/inputbar-app/index.html');
         await page.waitForSelector('.tile.focus');
+        const mid = await page.evaluate(() => {
+          const tiles = Array.from(document.querySelectorAll('#tiles .tile'));
+          const hits = tiles.map(t => {
+            const r = t.getBoundingClientRect();
+            const el = document.elementFromPoint(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2));
+            return !!(el && t.contains(el));
+          });
+          const mr = tiles[1].getBoundingClientRect();
+          return { allHit: hits.every(Boolean), x: Math.round(mr.left + mr.width / 2), y: Math.round(mr.top + mr.height / 2) };
+        });
+        if (!mid.allHit) problems.push(name + 'pointer hit blocked on input tiles');
+        await page.mouse.move(mid.x, mid.y);
+        await page.waitForFunction(() => document.querySelectorAll('#tiles .tile')[1].classList.contains('focus'));
+        await page.mouse.click(mid.x, mid.y);
+        await page.waitForTimeout(300);
+        const clickLaunches = await page.evaluate(() => window.launches);
+        if (clickLaunches.indexOf('com.webos.app.hdmi1') === -1) problems.push(name + 'clicking hovered HDMI 1 did not launch it');
+
+        await page.evaluate(() => { window.launches = []; });
+        await page.goto(base + '/assets/inputbar-app/index.html');
+        await page.waitForSelector('.tile.focus');
         await page.keyboard.press('ArrowLeft');
         await page.keyboard.press('ArrowLeft');
         await page.keyboard.press('Enter');
@@ -418,7 +439,7 @@ async function visitInputBarBehindHome(browser, base, problems) {
       dmsSub: document.querySelectorAll('.tile')[3].querySelector('.path').textContent
     }));
     if (!rowState.tworow || rowState.breaks !== 1) problems.push('Input bar: 6 inputs did not switch to two-row layout (' + JSON.stringify(rowState) + ')');
-    if (rowState.dmsSub !== 'Media Server') problems.push('Input bar: media server subtitle was ' + rowState.dmsSub);
+    if (rowState.dmsSub !== 'Media server') problems.push('Input bar: media server subtitle was ' + rowState.dmsSub);
     // Focus starts on HDMI 1 (index 1); Down jumps to AirPlay (index 4), Right moves to All Inputs (index 5).
     await page.keyboard.press('ArrowDown');
     const afterDown = await page.textContent('.tile.focus .nm');
@@ -699,9 +720,72 @@ async function visitHomeBarTiles(browser, base, problems) {
   try {
     const air = (await tiles(page)).filter(x => x.name === 'AirPlay');
     if (air.length !== 1 || !air[0].input || !air[0].svg) fail('AirPlay as an input only: ' + JSON.stringify(air));
+    const clk = await page.evaluate(() => {
+      var cs = getComputedStyle(document.getElementById('clock'));
+      return { fontFamily: cs.fontFamily, fontWeight: cs.fontWeight, fontSize: cs.fontSize };
+    });
+    if (clk.fontFamily.indexOf('Manrope') === -1 || clk.fontWeight !== '400' || clk.fontSize !== '40px') {
+      fail('unexpected clock style: ' + JSON.stringify(clk));
+    }
   } finally {
     await page.close();
   }
+}
+
+async function visitHomeBarHaTile(browser, base, problems) {
+  const fail = what => problems.push('Glasshouse Bar HA tile: ' + what);
+  const setup = async (haBar) => {
+    const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+    page.on('pageerror', e => fail(e.message));
+    await page.addInitScript(() => {
+      window.PalmSystem = { launchParams: '{}' };
+      window.__calls = [];
+      window.PalmServiceBridge = function () {};
+      window.PalmServiceBridge.prototype.call = function (uri, body) {
+        window.__calls.push({ uri, body: JSON.parse(body) });
+        if (this.onservicecallback) this.onservicecallback(JSON.stringify({ returnValue: true }));
+      };
+      window.close = function () {};
+    });
+    await page.route('http://localhost:8080/**', route => {
+      const url = new URL(route.request().url());
+      if (url.pathname === '/assets/devicons.js') return route.continue({ url: base + '/assets/devicons.js' });
+      if (url.pathname === '/api/home/now') return route.fulfill({ json: { kind: 'input', port: 1 } });
+      if (url.pathname === '/api/home/catalogue') {
+        return route.fulfill({ json: { ok: true, haBar, layout: { hidden: { app: [] } },
+          order: { app: ['app1'], dev: ['hdmi1'] }, apps: [{ id: 'app1', title: 'Test App' }],
+          devices: [{ id: 'hdmi1', name: 'HDMI 1', input: 'hdmi1', port: 1 }] } });
+      }
+      return route.fulfill({ json: {} });
+    });
+    await page.goto(base + '/assets/homebar-app/index.html');
+    await page.waitForFunction(() => document.querySelectorAll('#row .tile').length > 0);
+    return page;
+  };
+
+  let page = await setup(false);
+  try {
+    if (await page.locator('#row .tile.habar').count()) fail('HA tile shown while disabled');
+  } finally { await page.close(); }
+
+  page = await setup(true);
+  try {
+    const count = await page.locator('#row .tile.habar').count();
+    if (count !== 1) return fail('expected 1 HA tile, got ' + count);
+    const afterGap = await page.evaluate(() => {
+      const ha = document.querySelector('#row .tile.habar');
+      return !!(ha && ha.previousElementSibling && ha.previousElementSibling.classList.contains('gap'));
+    });
+    if (!afterGap) fail('expected separator gap before HA tile');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => window.__calls.some(c => /launch$/.test(c.uri)));
+    const launch = await page.evaluate(() => window.__calls.filter(c => /launch$/.test(c.uri)).pop().body);
+    if (launch.id !== 'com.tvweb.habar' || !launch.params || launch.params.glasshouse !== 'habar') {
+      fail('unexpected launch payload: ' + JSON.stringify(launch));
+    }
+  } finally { await page.close(); }
 }
 
 /*
@@ -766,6 +850,173 @@ async function visitHomeBarBesideHome(browser, base, problems) {
   } finally {
     await page.close();
   }
+}
+
+async function visitHaBar(browser, base, problems) {
+  const fail = what => problems.push('Home Assistant bar: ' + what);
+  const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+  page.on('pageerror', e => fail(e.message));
+  await page.addInitScript(() => {
+    window.__closed = false;
+    window.close = function () { window.__closed = true; };
+  });
+  let pct = 50;
+  let showHints = true;
+  const acts = [];
+  await page.route('**/api/ha/bar/**', route => {
+    const req = route.request();
+    const pathname = new URL(req.url()).pathname;
+    if (pathname.endsWith('/state')) {
+      return route.fulfill({
+        json: {
+          ok: true,
+          configured: true,
+          hour12: false,
+          showHints: showHints,
+          tiles: [
+            { id: 'light.desk', domain: 'light', label: 'Desk Lamp', state: 'on', active: true, adjustable: true, pct: pct, valueText: pct + '%', subText: '' },
+            { id: 'climate.living', domain: 'climate', label: 'Thermostat', state: 'heat', active: true, adjustable: true, pct: null, valueText: '22°C · heat', subText: 'Now 20.1°C' },
+            { id: 'scene.movie', domain: 'scene', label: 'Movie Time', state: 'scening', active: false, adjustable: false, pct: null, valueText: 'Activate', subText: '' }
+          ]
+        }
+      });
+    }
+    if (pathname.endsWith('/act')) {
+      const body = JSON.parse(req.postData() || '{}');
+      acts.push(body);
+      if (body.id === 'light.desk' && body.action === 'step') {
+        pct = Math.max(0, Math.min(100, pct + (body.value > 0 ? 10 : -10)));
+        return route.fulfill({ json: { ok: true, tile: { id: 'light.desk', domain: 'light', label: 'Desk Lamp', state: 'on', active: true, adjustable: true, pct: pct, valueText: pct + '%', subText: '' } } });
+      }
+      if (body.id === 'scene.movie') {
+        return route.fulfill({ json: { ok: true, tile: { id: 'scene.movie', domain: 'scene', label: 'Movie Time', state: 'scening', active: false, adjustable: false, pct: null, valueText: 'Activate', subText: '' } } });
+      }
+      return route.fulfill({ json: { ok: true, tile: { id: body.id, domain: 'climate', label: 'Thermostat', state: 'heat', active: true, adjustable: true, pct: null, valueText: '21.5°C · heat', subText: 'Now 20.1°C' } } });
+    }
+    return route.fulfill({ json: {} });
+  });
+  try {
+    await page.goto(base + '/assets/habar.html');
+    await page.waitForFunction(() => document.querySelectorAll('#row .tile').length === 3 && document.body.className === 'on');
+    const hintOn = await page.textContent('#hint');
+    if (hintOn.indexOf('OK toggle') === -1) fail('expected hint text when showHints=true, got ' + hintOn);
+    const focusStyle = await page.evaluate(() => {
+      const el = document.querySelector('.tile.focus.active.dom-light');
+      const cs = el ? getComputedStyle(el) : null;
+      return cs ? { bg: cs.backgroundColor, color: cs.color } : null;
+    });
+    if (!focusStyle || focusStyle.bg !== 'rgb(255, 255, 255)' || focusStyle.color !== 'rgb(17, 17, 17)') {
+      fail('focused active light tile contrast mismatch: ' + JSON.stringify(focusStyle));
+    }
+    await page.keyboard.press('ArrowUp');
+    await page.waitForFunction(() => document.querySelector('.tile.focus .val').textContent === '60%');
+    await page.keyboard.press('ArrowRight');
+    const climSub = await page.textContent('.tile.focus .sub');
+    if (climSub !== 'Now 20.1°C') fail('climate subText mismatch: ' + climSub);
+    await page.click('.tile.focus .step-btn[data-step="-1"]');
+    await page.waitForFunction(() => document.querySelector('.tile.focus .val').textContent.indexOf('21.5') === 0);
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('.tile.focus .val').textContent === 'Activated');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => window.__closed === true);
+    if (acts.length !== 3) fail('expected 3 act calls, got ' + acts.length);
+
+    showHints = false;
+    await page.evaluate(() => { window.__closed = false; });
+    await page.goto(base + '/assets/habar.html');
+    await page.waitForFunction(() => document.querySelectorAll('#row .tile').length === 3 && document.body.className === 'on');
+    const hintOff = await page.textContent('#hint');
+    const clockOff = await page.textContent('#clock');
+    if (hintOff !== '') fail('expected empty #hint when showHints=false, got ' + JSON.stringify(hintOff));
+    if (!clockOff) fail('expected #clock to remain visible when showHints=false');
+  } finally {
+    await page.close();
+  }
+}
+
+async function visitHomeHaRow(browser, base, problems) {
+  const fail = what => problems.push('Home HA row: ' + what);
+  const runCase = async (haRow, haBarAvailable, showHints = true) => {
+    const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+    page.on('pageerror', e => fail(e.message));
+    const layout = { rows: ['app', 'ha'], order: { app: [], ha: [] }, hidden: { app: [], ha: [] },
+      hiddenRows: [], channels: [], hintSeen: true, searchHintSeen: true, haRow };
+    let pct = 40, swOn = false;
+    const acts = [];
+    await page.route('**/api/home/**', route => {
+      const p = new URL(route.request().url()).pathname;
+      if (p === '/api/home/catalogue') {
+        return route.fulfill({ json: { ok: true, layout, layoutVersion: 1, haBarAvailable, haBarCount: 3,
+          apps: [{ id: 'netflix', title: 'Netflix' }], devices: [], channels: [],
+          sources: { channels: 0 }, order: { app: ['netflix'], ha: [] } } });
+      }
+      return route.fulfill({ json: { ok: true, layout, layoutVersion: 1 } });
+    });
+    await page.route('**/api/ha/bar/**', route => {
+      const p = new URL(route.request().url()).pathname;
+      if (p.endsWith('/state')) {
+        return route.fulfill({ json: { ok: true, configured: true, showHints, tiles: [
+          { id: 'switch.kettle', domain: 'switch', label: 'Kettle', state: swOn ? 'on' : 'off', active: swOn, adjustable: false, pct: null, valueText: swOn ? 'On' : 'Off', subText: '' },
+          { id: 'light.desk', domain: 'light', label: 'Desk', state: 'on', active: true, adjustable: true, pct, valueText: pct + '%', subText: '' },
+          { id: 'scene.movie', domain: 'scene', label: 'Movie Time', state: 'scening', active: false, adjustable: false, pct: null, valueText: 'Activate', subText: '' }
+        ] } });
+      }
+      if (p.endsWith('/act')) {
+        const body = JSON.parse(route.request().postData() || '{}');
+        acts.push(body);
+        if (body.id === 'switch.kettle') {
+          swOn = !swOn;
+          return route.fulfill({ json: { ok: true, tile: { id: 'switch.kettle', domain: 'switch', label: 'Kettle', state: swOn ? 'on' : 'off', active: swOn, adjustable: false, pct: null, valueText: swOn ? 'On' : 'Off', subText: '' } } });
+        }
+        if (body.id === 'light.desk' && body.action === 'step') {
+          pct = Math.max(0, Math.min(100, pct + (body.value > 0 ? 10 : -10)));
+          return route.fulfill({ json: { ok: true, tile: { id: 'light.desk', domain: 'light', label: 'Desk', state: 'on', active: true, adjustable: true, pct, valueText: pct + '%', subText: '' } } });
+        }
+        return route.fulfill({ json: { ok: true, tile: { id: 'scene.movie', domain: 'scene', label: 'Movie Time', state: 'scening', active: false, adjustable: false, pct: null, valueText: 'Activate', subText: '' } } });
+      }
+      return route.fulfill({ json: {} });
+    });
+    await page.goto(base + '/assets/home.html');
+    await page.waitForFunction(() => document.querySelectorAll('.row[data-key="app"] .tile').length === 1);
+    return { page, acts };
+  };
+
+  let ctx = await runCase(false, true);
+  try {
+    const visibleOff = await ctx.page.evaluate(() => getComputedStyle(document.querySelector('.row[data-key="ha"]')).display);
+    if (visibleOff !== 'none') fail('HA row should stay hidden when haRow=false (display=' + visibleOff + ')');
+  } finally { await ctx.page.close(); }
+
+  ctx = await runCase(true, true);
+  try {
+    const { page, acts } = ctx;
+    await page.waitForFunction(() => document.querySelectorAll('.row[data-key="ha"] .tile.ha').length === 3);
+    await page.keyboard.press('ArrowDown');
+    await page.waitForFunction(() => document.querySelector('.row.active') && document.querySelector('.row.active').getAttribute('data-key') === 'ha');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('.tile.ha.focus .ha-val').textContent === 'On');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('PageUp');
+    await page.waitForFunction(() => document.querySelector('.tile.ha.focus .ha-val').textContent === '50%');
+    await page.click('.tile.ha.focus .ha-step[data-step="1"]');
+    await page.waitForFunction(() => document.querySelector('.tile.ha.focus .ha-val').textContent === '60%');
+    await page.keyboard.press('PageDown');
+    await page.waitForFunction(() => document.querySelector('.tile.ha.focus .ha-val').textContent === '50%');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('.tile.ha.focus .ha-val').textContent === 'Activated');
+    await page.keyboard.press('ArrowUp');
+    await page.waitForFunction(() => document.querySelector('.row.active') && document.querySelector('.row.active').getAttribute('data-key') === 'app');
+    if (acts.length !== 5) fail('expected 5 HA row actions, got ' + JSON.stringify(acts));
+  } finally { await ctx.page.close(); }
+
+  ctx = await runCase(true, true, false);
+  try {
+    await ctx.page.waitForFunction(() => document.querySelectorAll('.row[data-key="ha"] .tile.ha').length === 3);
+    const haHead = await ctx.page.textContent('.row[data-key="ha"] h2');
+    if (haHead.indexOf('Ch +/-') !== -1) fail('expected no Ch +/- hint when showHints=false, got ' + haHead);
+  } finally { await ctx.page.close(); }
 }
 
 async function visitHomeWeather(browser, base, problems) {
@@ -1856,6 +2107,59 @@ async function visitHomeGuide(browser, base, problems) {
   } finally { await page.close(); }
 }
 
+// A return comes as a relaunch and the page shown again, in either order: one
+// catalogue and one /now, and a catalogue with the rev the view has leaves
+// the rows as they are.
+async function visitHomeReturnOnce(browser, base, problems) {
+  const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+  page.on('pageerror', e => problems.push('Home return: ' + e.message));
+  const layout = { rows: ['app', 'dev', 'ch'], order: { app: [], dev: [], ch: [] },
+    hidden: { app: [], dev: [], ch: [] }, channels: [], hintSeen: true, searchHintSeen: true };
+  const asked = { catalogue: 0, now: 0 };
+  await page.route('**/api/home/**', route => {
+    const url = new URL(route.request().url());
+    const reply = body => route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
+    if (url.pathname.endsWith('/catalogue')) {
+      asked.catalogue++;
+      return reply({ ok: true, rev: 'r1', layoutVersion: '1', layout, apps: [{ id: 'app0', title: 'App 0' }], devices: [], channels: [],
+        sources: { channels: 0 }, order: { app: ['app0'], dev: [], ch: [] } });
+    }
+    if (url.pathname.endsWith('/now')) { asked.now++; return reply({ kind: null }); }
+    return reply({ ok: true, build: 'one' });
+  });
+  try {
+    const homeResponse = endpoint => page.waitForResponse(response => new URL(response.url()).pathname === '/api/home/' + endpoint);
+    const startNow = homeResponse('now');
+    await page.goto(base + '/assets/home.html');
+    await page.waitForSelector('.tile');
+    await startNow;
+    await page.evaluate(() => {
+      window.__hidden = false;
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => window.__hidden });
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => window.__hidden ? 'hidden' : 'visible' });
+      window.__tile = document.querySelector('.tile');
+    });
+    for (const order of [['shown', 'relaunch'], ['relaunch', 'shown']]) {
+      await page.evaluate(() => { window.__hidden = true; document.dispatchEvent(new Event('visibilitychange')); });
+      const before = Object.assign({}, asked);
+      const replies = Promise.all([homeResponse('catalogue'), homeResponse('now')]);
+      await page.evaluate(steps => {
+        for (const step of steps) {
+          if (step === 'relaunch') document.dispatchEvent(new Event('webOSRelaunch'));
+          else { window.__hidden = false; document.dispatchEvent(new Event('visibilitychange')); }
+        }
+      }, order);
+      await replies;
+      // Leave time for a duplicate request queued behind the first reply.
+      await page.waitForTimeout(300);
+      const what = order.join(' then ');
+      if (asked.catalogue - before.catalogue !== 1) problems.push('Home return: ' + what + ' asked for the catalogue ' + (asked.catalogue - before.catalogue) + ' times');
+      if (asked.now - before.now !== 1) problems.push('Home return: ' + what + ' asked what is on ' + (asked.now - before.now) + ' times');
+      if (!(await page.evaluate(() => document.querySelector('.tile') === window.__tile))) problems.push('Home return: ' + what + ' rebuilt the rows for the same catalogue');
+    }
+  } finally { await page.close(); }
+}
+
 // Glasshouse Home's fading and its Inputs row without the inputs that have
 // nothing plugged in, each where the layout asks for it.
 async function visitHomeFadeAndInputs(browser, base, problems) {
@@ -1864,6 +2168,8 @@ async function visitHomeFadeAndInputs(browser, base, problems) {
   const layout = { rows: ['app', 'dev', 'ch'], order: { app: [], dev: [], ch: [] },
     hidden: { app: [], dev: [], ch: [] }, channels: [], hintSeen: true, searchHintSeen: true, colours: null, fade: false, hideUnused: true };
   let version = 1;
+  let sleeps = 0;
+  let screenOff = false;
   let openFails = false;
   let holdCatalogue = null;
   const opened = [];
@@ -1882,7 +2188,7 @@ async function visitHomeFadeAndInputs(browser, base, problems) {
     }
     const body = pathname === '/api/home/catalogue' ? catalogue()
       : pathname === '/api/home/now' ? { kind: 'none' }
-      : { ok: true, build: 'one', layoutVersion: String(version) };
+      : { ok: true, build: 'one', layoutVersion: String(version), sleeps, screenOff };
     return route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
   });
   const faded = () => page.evaluate(() => / ?faded/.test(document.documentElement.className));
@@ -1958,6 +2264,7 @@ async function visitHomeFadeAndInputs(browser, base, problems) {
 
     // Back on screen: dark while the rows and what was last on are refreshed, then in.
     await visible(true);
+    await waitUntil(page, faded, 2000);
     let releaseRows;
     holdCatalogue = new Promise(r => { releaseRows = r; });
     await visible(false);
@@ -1971,6 +2278,7 @@ async function visitHomeFadeAndInputs(browser, base, problems) {
     else if (!/\bin\b/.test(cls)) problems.push('Home fade: coming back did not use the fade in (' + cls + ')');
     // A refresh that does not come: in all the same, before long.
     await visible(true);
+    await waitUntil(page, faded, 2000);
     holdCatalogue = new Promise(r => { releaseRows = r; });
     await visible(false);
     await page.waitForTimeout(1000);
@@ -1978,6 +2286,16 @@ async function visitHomeFadeAndInputs(browser, base, problems) {
     releaseRows();
     holdCatalogue = null;
     await page.waitForTimeout(200);
+
+    // Screen off (TV into standby): stays as it was, and waking shows it without a fade.
+    sleeps++;
+    screenOff = true;
+    await visible(true);
+    await page.waitForTimeout(1200);
+    if (await faded()) problems.push('Home fade: screen going off darkened the view');
+    screenOff = false;
+    await visible(false);
+    if (await faded()) problems.push('Home fade: waking from standby left the view dark');
 
     // Arranging: the input with nothing plugged in shows, greyed out, and is not hidden on its own.
     layout.hideUnused = true;
@@ -2443,16 +2761,28 @@ async function visitHomeOrder(browser, base, problems) {
   let pauseSave = false, pauseCatalogue = false, saveHeld, catalogueHeld;
   const saveReady = new Promise(resolve => { saveHeld = resolve; });
   const catalogueReady = new Promise(resolve => { catalogueHeld = resolve; });
+  let wallChoice = 'shuffle';
+  const wallSaves = [];
   await page.route('**/api/home**', async route => {
     const pathname = new URL(route.request().url()).pathname;
     // The server sends a Last opened row in that order: here, YouTube was opened last.
     const order = { app: layout.sort.app === 'recent' ? ['two', 'one', 'lg-home'] : ['one', 'two', 'lg-home'], dev: [], ch: [] };
     const catalogue = { ok: true, apps: [{ id: 'one', title: 'One' }, { id: 'two', title: 'Two' }], devices: [], channels: [],
       sources: { channels: 0 }, order, layout };
+    const wallpapers = { choice: wallChoice, choices: ['black', 'landscape', 'abstract', 'own', 'shuffle', 'video'], pictures: [], videoUrls: [] };
     let body = { ok: true };
     if (pathname === '/api/home') body = Object.assign({ ok: true, supported: { ok: true }, enabled: true, active: true,
-      writable: true, layout, history: true }, new URL(route.request().url()).searchParams.get('with') ? { catalogue, channels: [] } : {});
+      writable: true, layout, wallpapers, history: true }, new URL(route.request().url()).searchParams.get('with') ? { catalogue, channels: [] } : {});
     else if (pathname === '/api/home/catalogue') body = catalogue;
+    else if (pathname === '/api/home/wallpapers') {
+      const patch = route.request().postDataJSON();
+      wallSaves.push(patch);
+      if (patch && patch.choose === 'video') body = { ok: false, error: 'Add at least one video URL first.' };
+      else {
+        if (patch && patch.choose) wallChoice = patch.choose;
+        body = { ok: true, wallpapers: Object.assign({}, wallpapers, { choice: wallChoice }) };
+      }
+    }
     else if (pathname === '/api/home/layout') {
       const patch = route.request().postDataJSON();
       saves.push(patch);
@@ -2575,6 +2905,19 @@ async function visitHomeOrder(browser, base, problems) {
       await page.keyboard.press('ArrowLeft');
       await page.locator('#rows .row.sel').filter({ hasText: new RegExp('^' + name) }).waitFor();
     }
+    // Pictures on "Your own, shuffled" with no video URLs must wrap to Landscape rather than requesting "video" (#1711).
+    const picRow = page.locator('#rows .row').filter({ hasText: /^Pictures/ }).first();
+    await picRow.click();
+    if (!(await picRow.innerText()).includes('Your own, shuffled')) {
+      problems.push('Home order: Pictures row did not start on Your own, shuffled');
+    }
+    saved = page.waitForResponse(r => new URL(r.url()).pathname === '/api/home/wallpapers');
+    await page.keyboard.press('Enter');
+    await saved;
+    if (!wallSaves.length || wallSaves[wallSaves.length - 1].choose !== 'landscape') {
+      problems.push('Home order: Pictures cycling from Your own, shuffled did not skip video without URLs: ' + JSON.stringify(wallSaves));
+    }
+    await picRow.filter({ hasText: 'Landscape' }).waitFor();
   } finally { await page.close(); }
 }
 
@@ -4253,6 +4596,13 @@ async function visitBrightnessKeySettings(browser, base, problems) {
     { key: 'red', title: 'Red', action: state.brightnessKey ? 'open' : 'lg', id: state.brightnessKey ? 'action:brightnessUp' : '', opens: state.brightnessKey ? 'Brightness up' : '' },
     { key: 'green', title: 'Green', action: 'lg' }
   ];
+  const choicesNow = () => [
+    { id: 'action:brightnessUp', title: 'Brightness up', kind: 'action' }
+  ];
+  const remoteKeysPayload = () => ({
+    ok: true, supported: true, keys: keysNow(), choices: choicesNow(),
+    brightnessStep: state.step, brightnessBar: state.bar, brightnessBarStyle: state.style
+  });
   try {
     await page.route('**/api/remote/available', route => route.fulfill({ json: { ok: true, available: true } }));
     await page.route('**/api/apps', async route => {
@@ -4261,15 +4611,15 @@ async function visitBrightnessKeySettings(browser, base, problems) {
         const apps = await (await route.fetch()).json();
         apps.writable = true;
         apps.quickAccess = null;
-        apps.remoteKeys = { ok: true, supported: true, keys: keysNow(), choices: [],
-          brightnessStep: state.step, brightnessBar: state.bar, brightnessBarStyle: state.style };
+        apps.remoteKeys = remoteKeysPayload();
         await route.fulfill({ json: apps });
       } catch (e) { /* closed */ }
     });
     await page.route('**/api/remotekeys', async route => {
-      if (route.request().method() !== 'POST') return route.continue();
+      if (route.request().method() !== 'POST') return route.fulfill({ json: remoteKeysPayload() });
       const set = route.request().postDataJSON();
       writes.push(set);
+      if (set.key === 'red') state.brightnessKey = set.action === 'open' && set.id === 'action:brightnessUp';
       if (set.brightnessBarStyle !== undefined) state.style = set.brightnessBarStyle;
       if (set.brightnessStep !== undefined) state.step = set.brightnessStep;
       await route.fulfill({ json: { ok: true } });
@@ -4286,13 +4636,33 @@ async function visitBrightnessKeySettings(browser, base, problems) {
     await open();
     if (await heading.count() || await stepSel.count() || await styleSel.count()) fail('the section shows with no key set to Brightness');
 
-    // A key set to it: the section, its heading first, then the step and the style.
-    state.brightnessKey = true;
+    // Setting a key updates the tile and reveals the section without a reload.
+    await page.locator('#apps-rk-list .rk-key[data-key="red"]').click();
+    await page.locator('#apps-rk-list .rk-pick [data-value="action:brightnessUp"]').click();
+    await heading.waitFor();
+    if (!await page.locator('#apps-rk-list .rk-key[data-key="red"] .rk-does', { hasText: 'Brightness up' }).isVisible()) {
+      fail('setting a key did not refresh its tile without a reload');
+    }
+
+    // A deferred redraw while another key's picker is open flushes when the picker closes.
+    await page.locator('#apps-rk-list .rk-key[data-key="green"]').click();
+    await page.locator('#apps-rk-list .rk-pick .rk-opt').first().focus();
+    await page.evaluate(() => {
+      const g = appsData.remoteKeys.keys.find(k => k.key === 'green');
+      g.action = 'nothing';
+      renderRemoteKeys(appsData);
+    });
+    await page.locator('#apps-rk-list .rk-pick .rk-close').click();
+    if (!await page.locator('#apps-rk-list .rk-key[data-key="green"] .rk-does', { hasText: 'Does nothing' }).isVisible()) {
+      fail('closing the picker did not flush a deferred tile redraw');
+    }
+
+    // A key set to it: on desktop width, step and style sit side by side under the heading.
     await open();
     await heading.waitFor();
     if (!await stepSel.isVisible() || !await styleSel.isVisible()) fail('the step or the style row is missing from the section');
     const [hy, sy, by] = await Promise.all([heading.boundingBox(), stepSel.boundingBox(), styleSel.boundingBox()]);
-    if (!(hy.y < sy.y && sy.y < by.y)) fail('the heading, the step and the style are not in that order');
+    if (!(hy.y < sy.y && Math.abs(sy.y - by.y) < 10 && sy.x < by.x)) fail('step and style are not side by side under the heading on desktop');
     if (await page.locator('#apps-rk-list .rk-key').last().boundingBox().then(b => b.y) > hy.y) fail('the section is above the keys');
     const options = await styleSel.locator('option').evaluateAll(o => o.map(x => x.value));
     if (JSON.stringify(options) !== JSON.stringify(['lg', 'horizontal', 'vertical', 'none'])) fail('the style offers ' + options + ', not lg, horizontal, vertical and none');
@@ -4319,12 +4689,14 @@ async function visitBrightnessKeySettings(browser, base, problems) {
     if (!await stepSel.isVisible()) fail('the step is missing where the bar cannot be shown');
     if (await styleSel.count()) fail('the style is offered where the bar cannot be shown');
 
-    // At phone width the section stays inside the page.
+    // At phone width the rows stack and stay inside the page.
     state.bar = true;
     await page.setViewportSize({ width: 390, height: 800 });
     await open();
     await heading.waitFor();
     if (!await styleSel.isVisible()) fail('the style row is not visible at phone width');
+    const [syMob, byMob] = await Promise.all([stepSel.boundingBox(), styleSel.boundingBox()]);
+    if (!(syMob.y < byMob.y)) fail('step and style did not stack vertically at phone width');
     if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) fail('the section makes the page scroll sideways at phone width');
     await page.setViewportSize({ width: 1280, height: 800 });
 
@@ -4332,6 +4704,109 @@ async function visitBrightnessKeySettings(browser, base, problems) {
     state.brightnessKey = false;
     await open();
     if (await heading.count() || await stepSel.count() || await styleSel.count()) fail('the section stays with no key set to Brightness');
+  } catch (e) {
+    fail(e.message);
+  } finally {
+    await page.close();
+  }
+}
+
+async function visitRemoteFolding(browser, base, problems) {
+  const page = await browser.newPage();
+  const fail = message => problems.push('Remote folding: ' + message);
+  page.on('pageerror', error => fail(error.message));
+  const state = { mode: 'auto', known: true };
+  const writes = [];
+  const mr25 = { id: 'MR25GA', title: 'Magic Remote MR25GA', image: 'generic.png', numberKeys: false };
+  const payload = () => {
+    // Dead on the remote in use whenever it is known, folding (auto) or not (all); only
+    // the toggle's own state (folding) decides whether the page hides it or sets it apart.
+    const markedOff = state.known;
+    const folding = state.known && state.mode === 'auto';
+    return {
+      ok: true,
+      supported: true,
+      keys: [
+        { key: 'netflix', title: 'Netflix', action: 'lg' },
+        { key: 'red', title: 'Red', action: 'lg', offRemote: markedOff }
+      ],
+      choices: [],
+      brightnessStep: 10,
+      brightnessBar: false,
+      brightnessBarStyle: 'lg',
+      remotes: state.known ? {
+        mode: state.mode,
+        canFold: true,
+        folding: folding,
+        why: '',
+        selected: state.mode === 'auto' ? [mr25] : [],
+        unknown: 0,
+        detected: [{ name: 'LGE MR25GA', id: 'MR25GA', title: 'Magic Remote MR25GA', image: 'generic.png', current: true }]
+      } : {
+        mode: state.mode,
+        canFold: false,
+        folding: false,
+        why: state.mode === 'auto' ? 'unknown' : '',
+        selected: [],
+        unknown: state.mode === 'auto' ? 1 : 0,
+        detected: [{ name: 'LGE MR22GN', id: null, title: 'LGE MR22GN', image: 'generic.png', current: true }]
+      }
+    };
+  };
+  try {
+    await page.route('**/api/remote/available', route => route.fulfill({ json: { ok: true, available: true } }));
+    await page.route('**/api/apps', async route => {
+      try {
+        const apps = await (await route.fetch()).json();
+        apps.writable = true;
+        apps.quickAccess = { ok: true, supported: true, keys: [{ key: 1, title: 'Netflix', id: 'netflix' }] };
+        apps.remoteKeys = payload();
+        await route.fulfill({ json: apps });
+      } catch (e) { /* closed */ }
+    });
+    await page.route('**/api/remotekeys', async route => {
+      if (route.request().method() !== 'POST') return route.fulfill({ json: payload() });
+      const body = route.request().postDataJSON();
+      writes.push(body);
+      if (body && body.remotes && body.remotes.mode) state.mode = body.remotes.mode;
+      await route.fulfill({ json: { ok: true } });
+    });
+
+    await page.goto(base + '/?tab=remote');
+    const filter = page.locator('#apps-remote-filter');
+    const toggle = page.locator('#btn_remote_only');
+    await filter.waitFor();
+    if (!await toggle.evaluate(el => el.classList.contains('good')) || (await toggle.textContent()).trim() !== 'On') {
+      fail('toggle did not render as active On pill');
+    }
+    if (!/Detected: Magic Remote MR25GA/.test(await page.locator('#apps-remote-detected').textContent())) {
+      fail('detected remote name was not shown under the switch');
+    }
+    const otherGroup = page.locator('#apps-rk-list .rk-more summary', { hasText: 'Buttons on other remotes (1)' });
+    const redKey = page.locator('#apps-rk-list .rk-key[data-key="red"]');
+    // Dead on the remote in use while folding: left off the page entirely, not shown folded.
+    if (await otherGroup.count()) fail('Buttons on other remotes was shown while folding');
+    if (await redKey.count()) fail('a key dead on the remote in use was shown while folding');
+    await toggle.click();
+    await page.waitForFunction(() => document.getElementById('btn_remote_only').classList.contains('idle'));
+    if (JSON.stringify(writes[writes.length - 1]) !== JSON.stringify({ remotes: { mode: 'all' } })) {
+      fail('clicking toggle did not save mode all');
+    }
+    if (!await filter.isVisible()) fail('folding switch disappeared when turned off');
+    if (!/Magic Remote MR25GA/.test(await page.locator('#apps-remote-detected').textContent())) {
+      fail('detected remote name disappeared when folding was turned off');
+    }
+    await otherGroup.waitFor();
+    await otherGroup.click();
+    if (!await redKey.isVisible()) fail('Red key did not show under Buttons on other remotes with folding off');
+
+    state.mode = 'auto';
+    state.known = false;
+    await page.goto(base + '/?tab=remote');
+    await page.locator('#apps-rk-list .rk-key[data-key="netflix"]').waitFor();
+    if (await filter.isVisible()) fail('folding switch was shown for an unlisted remote');
+    if (await otherGroup.count()) fail('Buttons on other remotes was shown for an unlisted remote');
+    if (!await page.locator('#apps-rk-list .rk-key[data-key="red"]').isVisible()) fail('Red key was not shown for an unlisted remote');
   } catch (e) {
     fail(e.message);
   } finally {
@@ -4974,13 +5449,13 @@ async function visitRemoteView(browser, base, problems) {
 
 function groups(web, tv) {
   return [
-    { job: 'tabs', tabs: web.map(t => ({ path: '/?tab=' + t, label: 'web ' + t })), visits: [visitHomeAnimations, visitHuesyncSettings, visitInputsAndRemote, visitBrightnessKeySettings, visitAdblockCards, visitSaverEntitySlots, visitRemoteView, visitRemoteMotion] },
+    { job: 'tabs', tabs: web.map(t => ({ path: '/?tab=' + t, label: 'web ' + t })), visits: [visitHomeAnimations, visitHuesyncSettings, visitInputsAndRemote, visitBrightnessKeySettings, visitRemoteFolding, visitAdblockCards, visitSaverEntitySlots, visitRemoteView, visitRemoteMotion] },
     { job: 'tabs', tabs: tv.map(t => ({ path: '/assets/dashboard.html?tab=' + t, label: 'TV ' + t })),
       visits: [visitTvDashboard, visitTvAudio, visitTvPictureWrites, visitPictureUnavailable, visitTvNonOled, visitTvHuesync] },
-    { job: 'home', tabs: [], visits: [visitHomePicture, visitHomePreview, visitHomePreviewOptions, visitHomePreviewWebos4, visitHomePreviewSize, visitHomePreviewSizeDetails, visitInputBarBehindHome, visitInputBarSwitchOnOk, visitHomeBarPrewarm, visitHomeBarIconsReady, visitHomeBarTiles, visitHomeBarBesideHome, visitHomeBarScroll, visitHomeUpDown, visitHomeFolderKeys, visitHomePointerOff, visitHomeOrder, visitHomeAvailability, visitHomeSearch, visitHomeWeather, visitHomeWeatherSetting, visitHomeRemoteBattery, visitHomeRemoteBatterySetting] },
+    { job: 'home', tabs: [], visits: [visitHomePicture, visitHomePreview, visitHomePreviewOptions, visitHomePreviewWebos4, visitHomePreviewSize, visitHomePreviewSizeDetails, visitInputBarBehindHome, visitInputBarSwitchOnOk, visitHomeBarPrewarm, visitHomeBarIconsReady, visitHomeBarTiles, visitHomeBarHaTile, visitHomeBarBesideHome, visitHomeBarScroll, visitHaBar, visitHomeHaRow, visitHomeUpDown, visitHomeFolderKeys, visitHomePointerOff, visitHomeOrder, visitHomeAvailability, visitHomeSearch, visitHomeWeather, visitHomeWeatherSetting, visitHomeRemoteBattery, visitHomeRemoteBatterySetting] },
     { job: 'home', tabs: [], visits: [visitHomeArrangement, visitHomeVisibility, visitHomeColours, visitHomeInputsEditor, visitHomeEditor,
       visitHomeRecentsHidden, visitHomeSaverWake, visitHomeUploads, visitHomeShuffle, visitHomeLauncher, visitHomeReadiness, visitAudioOverride, visitHomeRecents, visitHomeGuide,
-      visitHomeFadeAndInputs] },
+      visitHomeFadeAndInputs, visitHomeReturnOnce] },
     { job: 'home', tabs: [], visits: [visitHomeInternetTv, visitIptvChannels] },
     /*
      * Scrolling and motion read the row's place frame by frame, and missed

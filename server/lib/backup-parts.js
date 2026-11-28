@@ -34,6 +34,8 @@ var apps = null;
 var home = null;
 /** @type {typeof import('./resettime')} */
 var resettime = null;
+/** @type {typeof import('./habar') | null} */
+var haBar = null;
 /** @type {function(function(boolean): void): void} */
 var alwaysOnSupported = function (cb) { cb(false); };
 
@@ -327,6 +329,21 @@ var PARTS = [
     write: function (v, cb) { remoteKeys.setBrightnessBarStyle(v, cb); }
   },
   {
+    // Whether the Remote tab is folded to the remote(s) detected: { mode: 'auto' | 'all' }.
+    id: 'remoteSelection',
+    action: 'remoteSelection',
+    valid: function (v) {
+      return isObject(v) && (v.mode === 'auto' || v.mode === 'all');
+    },
+    read: function (cb) {
+      remoteKeys.getRemoteKeys(function (r) {
+        if (!r || !r.supported || !r.remotes) return cb(undefined);
+        cb({ mode: r.remotes.mode });
+      });
+    },
+    write: function (v, cb) { remoteKeys.setRemoteSelection(v.mode, cb); }
+  },
+  {
     // { '1'..'9': what the key opens, '' for nothing }.
     id: 'quickAccess',
     action: 'quickAccess',
@@ -381,6 +398,19 @@ var PARTS = [
     valid: function (v) { return typeof v === 'number' && v % 1 === 0 && v >= 0 && v <= 1440; },
     read: function (cb) { cb(config && typeof config.screensaverPowerOffMinutes === 'number' ? config.screensaverPowerOffMinutes : 0); },
     write: function (v, cb) { control('screensaverPowerOff', v || '', cb); }
+  },
+  {
+    id: 'haBar',
+    valid: function (v) {
+      return Array.isArray(v) && v.length <= 16 && v.every(function (item) {
+        return isObject(item) && typeof item.id === 'string' && /^[a-z0-9_]+\.[a-z0-9_]+$/.test(item.id) &&
+          (item.label === undefined || (typeof item.label === 'string' && item.label.length <= 40)) &&
+          (item.control === undefined || typeof item.control === 'boolean');
+      });
+    },
+    read: function (cb) { cb(haBar ? haBar.listConfig().entities : []); },
+    refuse: function () { return haBar ? null : 'absent'; },
+    write: function (v, cb) { cb(haBar.saveConfig(v)); }
   }
 ];
 
@@ -417,13 +447,13 @@ var NOT_CARRIED = {
   tileHiding: 'choose',
   // Screen saver entity slots and colors can be chosen per TV.
   screensaverEntities: 'choose', screensaverColor: 'choose',
-  setTileHidingAllowed: 'experimental', setWebos10ScreensaversAllowed: 'experimental', setInputBarAllowed: 'experimental', setPointerEnabled: 'experimental', setPointerSettings: 'experimental',
+  setTileHidingAllowed: 'experimental', setWebos10ScreensaversAllowed: 'experimental', setInputBarAllowed: 'experimental', setPointerEnabled: 'experimental', setLunaViaPalmbus: 'experimental', setPointerSettings: 'experimental',
   setNetworkDebuggerAllowed: 'access', setDashboardPort: 'access',
   setDeviceName: 'tvName',
   // config.json's, in backup.js's GLASSHOUSE.
   // The adBlock part's control under its other names.
   adblock: 'carried', toggleAdBlock: 'carried',
-  updateAutoCheck: 'carried', setPrometheusEnabled: 'carried', setNtpServer: 'carried', setNtpEnabled: 'carried',
+  updateAutoCheck: 'carried', updateAskOnTv: 'carried', closeInputBanner: 'carried', setPrometheusEnabled: 'carried', setNtpServer: 'carried', setNtpEnabled: 'carried',
   setHistoryEnabled: 'carried', setBackupDaily: 'carried', setScreenGlowAllowed: 'carried',
   // One of lgsettings.js's rows: carried by its section.
   lgSetting: 'carried'
@@ -441,6 +471,7 @@ function init(opts) {
   apps = opts.apps;
   home = opts.home || null;
   if (opts.resettime) resettime = opts.resettime;
+  if (opts.habar || opts.haBar) haBar = opts.habar || opts.haBar;
   if (opts.alwaysOnSupported) alwaysOnSupported = opts.alwaysOnSupported;
 }
 
