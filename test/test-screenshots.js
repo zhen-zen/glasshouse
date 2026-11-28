@@ -15,7 +15,7 @@ process.on('exit', function () {
   fs.rmdirSync(directory);
 });
 function checkCleanup() {
-  screenshots.init({ directory: directory, now: function () { return 100000; }, enabled: true });
+  screenshots.init({ directory: directory, now: function () { return 100000; }, enabled: true, webos: '10.3.1' });
   function file(name) { return path.join(directory, name); }
   function make(name, mb, modified) {
     var fd = fs.openSync(file(name), 'w');
@@ -94,7 +94,7 @@ function checkCleanup() {
         var limit = limits.shift();
         reset();
         ['a', 'b', 'c'].forEach(function (id, index) { make('capture_' + id + '.png', 16, index + 1); });
-        screenshots.init({ directory: directory, maxMiB: limit, now: function () { return 100000; }, enabled: true });
+        screenshots.init({ directory: directory, maxMiB: limit, now: function () { return 100000; }, enabled: true, webos: '10.3.1' });
         screenshots.cleanup(function (r) {
           assert.strictEqual(r.ok, true);
           var kept = ['a', 'b', 'c'].filter(function (id) { return fs.existsSync(file('capture_' + id + '.png')); });
@@ -107,6 +107,21 @@ function checkCleanup() {
       })();
     }
   ];
+  // Outside webOS 10 they stay off, whatever config.json says.
+  steps.push(function (next) {
+    ['4.4.3', '9.2.2', '11.1.0', ''].forEach(function (v) {
+      screenshots.init({ directory: directory, enabled: true, webos: v });
+      assert.strictEqual(screenshots.isSupported(), false, v);
+      assert.strictEqual(screenshots.isEnabled(), false, v);
+    });
+    screenshots.init({ directory: directory, enabled: false, webos: '4.4.3', writeSettings: function () { throw new Error('saved'); } });
+    screenshots.setEnabled(true, function (r) {
+      assert.strictEqual(r.ok, false);
+      assert.ok(/webOS 10/.test(r.error), r.error);
+      console.log('  \u2713 offered only on webOS 10, and stays off elsewhere whatever config.json says');
+      next();
+    });
+  });
   // Switched off, cleanup leaves everything alone: it runs only while on.
   steps.push(function (next) {
     make('capture_off_a.png', 40, 1000);

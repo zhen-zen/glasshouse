@@ -725,6 +725,7 @@ function detectRemotes(cb) {
 screenshots.init({
   maxMiB: CONFIG.screenshots && CONFIG.screenshots.maxMiB,
   enabled: !!(CONFIG.screenshots && CONFIG.screenshots.enabled === true),
+  webos: telemetry.detectWebosVersion(),
   writeSettings: routes.writeSettings,
   onChange: function (on, cb) { remoteKeys.screenshotsChanged(on, function () { cb(); }); }
 });

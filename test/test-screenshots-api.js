@@ -28,7 +28,7 @@ process.on('exit', function () {
   fs.rmdirSync(directory);
 });
 var savedSettings = [];
-screenshots.init({ directory: directory, maxMiB: 64,
+screenshots.init({ directory: directory, maxMiB: 64, webos: '10.3.1',
   writeSettings: function (patch, cb) { savedSettings.push(patch); cb(null); } });
 var config = { allowControl: true, token: 'screenshot-test-token' };
 routes.init({ config: config, screenshots: screenshots });

@@ -1,6 +1,6 @@
 let screenshotWritable = false, screenshotBusy = false;
 // Whether screenshots are switched on, and whether this dashboard may see them.
-let screenshotsOn = false, screenshotsHere = true;
+let screenshotsOn = false, screenshotsHere = true, screenshotsSupported = true;
 let screenshotTimer = null, screenshotListController = null, screenshotImageController = null;
 let screenshotVersion = '', screenshotUrls = new Map();
 let screenshotDeleteId = '', screenshotDeleteUntil = 0, screenshotDeleteTimer = null;
@@ -183,6 +183,8 @@ async function loadScreenshots(clearMessage = false) {
     screenshotWritable = !!result.writable;
     screenshotsOn = !!result.enabled;
     screenshotsHere = result.here !== false;
+    screenshotsSupported = result.supported !== false;
+    q('screenshots-unsupported').hidden = screenshotsSupported;
     renderScreenshotsAllowed();
     if (!screenshotsOn || !screenshotsHere) {
       q('screenshots-body').hidden = true;
@@ -216,7 +218,7 @@ function renderScreenshotsAllowed() {
   const btn = q('btn_screenshots');
   btn.textContent = screenshotsOn ? t('common.on', 'On') : t('common.off', 'Off');
   btn.className = 'pill ' + (screenshotsOn ? 'good' : 'idle');
-  btn.disabled = screenshotBusy || !screenshotWritable;
+  btn.disabled = screenshotBusy || !screenshotWritable || (!screenshotsSupported && !screenshotsOn);
 }
 
 async function toggleScreenshotsAllowed() {

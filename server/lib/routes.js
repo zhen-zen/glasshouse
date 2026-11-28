@@ -2524,7 +2524,7 @@ function handleRequest(req, res) {
       });
     }
     if (pathname === '/api/screenshots' && req.method === 'GET' && (!shotsOn || !shotsHere)) {
-      return send(res, 200, JSON.stringify({ ok: true, enabled: shotsOn, here: shotsHere, writable: !!config.allowControl, screenshots: [] }));
+      return send(res, 200, JSON.stringify({ ok: true, enabled: shotsOn, supported: screenshotsModule.isSupported(), here: shotsHere, writable: !!config.allowControl, screenshots: [] }));
     }
     if (!shotsOn || !shotsHere) return send(res, shotsOn ? 403 : 404, JSON.stringify({ ok: false, error: shotsOn ? msg('srv.screenshots.notHere', 'Screenshots can be seen on the TV itself, or from here once the dashboard has a token') : msg('srv.screenshots.off', 'Screenshots are switched off') }));
     if (pathname === '/api/screenshots/image' && (req.method === 'GET' || req.method === 'HEAD')) {
@@ -2548,6 +2548,7 @@ function handleRequest(req, res) {
       return screenshotsModule.list(function (r) {
         r.writable = !!config.allowControl;
         r.enabled = true;
+        r.supported = true;
         r.here = true;
         send(res, r.ok ? 200 : 500, JSON.stringify(r));
       });

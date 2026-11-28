@@ -4,7 +4,7 @@ The **Tools** tab, `/?tab=tools`, manages screenshots and provides live system l
 
 ## Screenshots
 
-Screenshots are off until **Take screenshots with a remote key** is switched on here. While it is off, no remote key can be set to take one, Glasshouse's key filter on the TV carries none of their code, and nothing is cleaned up in the background. Switching it off puts any screenshot key back as LG has it and deletes the saved images.
+Screenshots are off until **Take screenshots with a remote key** is switched on here. It is offered on webOS 10, where the TV says which remote a key came from; on webOS 4 and 9 it never does, so the switch stays off, and webOS 11 handles its keys natively, where screenshots aren't offered. While it is off, no remote key can be set to take one, Glasshouse's key filter on the TV carries none of their code, and nothing is cleaned up in the background. Switching it off puts any screenshot key back as LG has it and deletes the saved images.
 
 Switched on, a key set to **Screenshot** in [Remote keys](remote.md#remote-keys) saves a picture of the screen, in the capture mode and resolution chosen there. Only a press on a remote in the room takes one: keys sent over the network, from Glasshouse's Remote tab or a phone app, never do. The TV shows a notice each time, saying where the picture can be seen.
 

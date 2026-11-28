@@ -18,6 +18,14 @@ var nowFn = Date.now;
  * the remote keys put screenshot keys back as LG has them (onChange).
  */
 var enabled = false;
+/*
+ * Only where the compositor says which device a key came from, without which
+ * the filter takes no screenshot: webOS 10, as a webOS 10.3.1 TV does. An
+ * OLED65B8SLC (webOS 4.4.3) and an OLED42C24LA (webOS 9.2) give the key
+ * filter no device id and have no getDeviceType, so nothing could ever be
+ * taken; webOS 11 handles keys natively, where screenshots are not offered.
+ */
+var supported = false;
 var writeSettings = null;
 var onChange = function (on, cb) { cb(); };
 
@@ -26,15 +34,18 @@ function init(opts) {
   maxBytes = isFinite(bytes) && bytes > 0 ? bytes : DEFAULT_MAX_BYTES;
   directory = opts.directory || '/tmp';
   nowFn = opts.now || Date.now;
-  enabled = opts.enabled === true;
+  supported = parseInt(String(opts.webos || ''), 10) === 10;
+  enabled = opts.enabled === true && supported;
   writeSettings = opts.writeSettings || null;
   if (typeof opts.onChange === 'function') onChange = opts.onChange;
 }
 
 function isEnabled() { return enabled; }
+function isSupported() { return supported; }
 
 function setEnabled(on, cb) {
   on = on === true;
+  if (on && !supported) return cb({ ok: false, error: msg('srv.screenshots.unsupported', 'Screenshots need webOS 10: on this TV a key does not say which remote it came from') });
   if (!writeSettings) return cb({ ok: false, error: 'no writeSettings handler configured' });
   writeSettings({ screenshots: { enabled: on } }, function (err) {
     if (err) return cb({ ok: false, error: msg('srv.saveSettingFailed', 'could not save the setting: {error}', { error: err.message }) });
@@ -142,4 +153,4 @@ function cleanup(cb) {
   });
 }
 
-module.exports = { init: init, isEnabled: isEnabled, setEnabled: setEnabled, list: list, openImage: openImage, remove: remove, clear: clear, cleanup: cleanup };
+module.exports = { init: init, isEnabled: isEnabled, isSupported: isSupported, setEnabled: setEnabled, list: list, openImage: openImage, remove: remove, clear: clear, cleanup: cleanup };
